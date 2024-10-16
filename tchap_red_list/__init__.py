@@ -55,6 +55,8 @@ class RedListManager:
             check_username_for_spam=self.check_user_in_red_list,
         )
 
+        self._api.register_cached_function(self._get_user_status)
+
         if setup_db:
             # Set up the storage layer
             # We run this in the background because there's no other way to run async code
@@ -181,7 +183,6 @@ class RedListManager:
             """
             for user in users_to_add:
                 txn.execute(sql, (user, True))
-                self._get_user_status.invalidate((user,))
 
             return users_to_add
 
@@ -192,6 +193,7 @@ class RedListManager:
 
         # Make the expired users leave the discovery room if there's one.
         for user in users_added:
+            await self._api.invalidate_cache(self._get_user_status, (user,))
             await self._maybe_change_membership_in_discovery_room(user, "leave")
 
     async def _remove_renewed_users(self) -> None:
@@ -236,15 +238,14 @@ class RedListManager:
                 keyvalues={},
             )
 
-            for user in renewed_users:
-                self._get_user_status.invalidate((user,))
-
             return renewed_users
 
         users_removed = await self._api.run_db_interaction(
             "tchap_red_list_remove_renewed_users",
             remove_renewed_users_txn,
         )
+        for user in users_removed:
+            await self._api.invalidate_cache(self._get_user_status, (user,))
 
         # Make the renewed users re-join the discovery room if there's one.
         for user in users_removed:
@@ -299,12 +300,11 @@ class RedListManager:
             """
             txn.execute(sql, (user_id, because_expired))
 
-            self._get_user_status.invalidate((user_id,))
-
         await self._api.run_db_interaction(
             "tchap_red_list_add",
             _add_to_red_list_txn,
         )
+        await self._api.invalidate_cache(self._get_user_status, (user_id,))
 
         # If there is a room used for user discovery, make them leave it.
         await self._maybe_change_membership_in_discovery_room(user_id, "leave")
@@ -325,12 +325,11 @@ class RedListManager:
                 updatevalues={"because_expired": False},
             )
 
-            self._get_user_status.invalidate((user_id,))
-
         await self._api.run_db_interaction(
             "tchap_red_list_make_addition_permanent",
             make_addition_permanent,
         )
+        await self._api.invalidate_cache(self._get_user_status, (user_id,))
 
     async def _remove_from_red_list(self, user_id: str) -> None:
         """Remove the given user from the red list.
@@ -345,12 +344,12 @@ class RedListManager:
             """
             txn.execute(sql, (user_id,))
 
-            self._get_user_status.invalidate((user_id,))
-
         await self._api.run_db_interaction(
             "tchap_red_list_remove",
             _remove_from_red_list_txn,
         )
+
+        await self._api.invalidate_cache(self._get_user_status, (user_id,))
 
         # If there is a room used for user discovery, make them join it.
         await self._maybe_change_membership_in_discovery_room(user_id, "join")
