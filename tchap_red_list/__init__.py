@@ -82,6 +82,7 @@ class RedListManager:
         """Update a user's status in the red list when their account data changes.
         Implements the on_account_data_updated account data callback.
         """
+        logger.debug(f"Update Red List {user_id}={content}")
         if account_data_type != ACCOUNT_DATA_TYPE:
             return
 
@@ -133,6 +134,7 @@ class RedListManager:
         Implements the check_username_for_spam spam checker callback.
         """
         user_in_red_list, _ = await self._get_user_status(user_profile["user_id"])
+        logger.debug(f"User {user_profile['user_id']} in red list={user_in_red_list}")
         return user_in_red_list
 
     async def _add_expired_users(self) -> None:
