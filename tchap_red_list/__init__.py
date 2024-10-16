@@ -168,7 +168,7 @@ class RedListManager:
 
             # Figure out which users we need to add to the red list by looking up whether
             # they're already in it.
-            users_in_red_list = [row["user_id"] for row in red_list_users_rows]
+            users_in_red_list = [row[0] for row in red_list_users_rows]
             users_to_add = [
                 user for user in expired_users if user not in users_in_red_list
             ]
@@ -207,7 +207,7 @@ class RedListManager:
                 retcols=["user_id"],
             )
 
-            previously_expired_users = [row["user_id"] for row in rows]
+            previously_expired_users = [row[0] for row in rows]
 
             # Among these users, figure out which ones are still expired.
             rows = DatabasePool.simple_select_many_txn(
@@ -222,8 +222,8 @@ class RedListManager:
             renewed_users: List[str] = []
             now_ms = int(time.time() * 1000)
             for row in rows:
-                if row["expiration_ts_ms"] > now_ms:
-                    renewed_users.append(row["user_id"])
+                if row[1] > now_ms:
+                    renewed_users.append(row[0])
 
             # Remove the users who aren't expired anymore.
             DatabasePool.simple_delete_many_txn(
@@ -381,7 +381,7 @@ class RedListManager:
             if row is None:
                 return False, False
 
-            return True, bool(row["because_expired"])
+            return True, bool(row[0])
 
         return await self._api.run_db_interaction(
             "tchap_red_list_get_status",
