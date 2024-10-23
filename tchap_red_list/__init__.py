@@ -151,7 +151,8 @@ class RedListManager:
         def add_expired_users_txn(txn: LoggingTransaction) -> List[str]:
             # Retrieve all the expired users.
             sql = """
-            SELECT user_id FROM email_account_validity WHERE expiration_ts_ms <= ?
+            SELECT user_id FROM email_account_validity WHERE expiration_ts_ms <= ? 
+            LIMIT 100
             """
 
             now_ms = int(time.time() * 1000)
