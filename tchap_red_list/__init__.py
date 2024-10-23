@@ -26,9 +26,6 @@ from synapse.module_api import (
     run_in_background,
 )
 from synapse.module_api.errors import ConfigError, SynapseError
-from synapse.types import (
-    create_requester,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +40,7 @@ class RedListManagerConfig:
 
 class RedListManager:
     def __init__(
-            self, config: RedListManagerConfig, api: ModuleApi, setup_db: bool = True
+        self, config: RedListManagerConfig, api: ModuleApi, setup_db: bool = True
     ):
         # Keep a reference to the config and Module API
         self._api = api
@@ -75,18 +72,20 @@ class RedListManager:
             )
 
         if self._config.discovery_room:
-            self._api.looping_background_call(self._update_discovery_room, 60 * 60 * 1000)
+            self._api.looping_background_call(
+                self._update_discovery_room, 60 * 60 * 1000
+            )
 
     @staticmethod
     def parse_config(config: Dict[str, Any]) -> RedListManagerConfig:
         return RedListManagerConfig(**config)
 
     async def update_red_list_status(
-            self,
-            user_id: str,
-            room_id: Optional[str],
-            account_data_type: str,
-            content: JsonDict,
+        self,
+        user_id: str,
+        room_id: Optional[str],
+        account_data_type: str,
+        content: JsonDict,
     ) -> None:
         """Update a user's status in the red list when their account data changes.
         Implements the on_account_data_updated account data callback.
@@ -117,7 +116,7 @@ class RedListManager:
                 await self._remove_from_red_list(user_id)
 
     async def _maybe_change_membership_in_discovery_room(
-            self, user_id: str, membership: str
+        self, user_id: str, membership: str
     ) -> None:
         """Change a user's membership in the discovery room.
 
@@ -289,9 +288,9 @@ class RedListManager:
         )
 
     async def _add_to_red_list(
-            self,
-            user_id: str,
-            because_expired: bool = False,
+        self,
+        user_id: str,
+        because_expired: bool = False,
     ) -> None:
         """Add the given user to the red list.
 
@@ -411,22 +410,23 @@ class RedListManager:
                 LEFT JOIN tchap_red_list trl ON u.name = trl.user_id
                 WHERE u.deactivated = 0
                 AND trl.user_id is NULL
-                LIMIT 1000
+                LIMIT 100
                 """,
                 (),
             )
             return txn.fetchall()
 
-        visible_users: List[Dict[str, Union[str, int]]] = await self._api.run_db_interaction(
-            "get_expired_users",
-            select_users_txn
+        visible_users: List[Dict[str, Union[str, int]]] = (
+            await self._api.run_db_interaction("get_expired_users", select_users_txn)
         )
         return set(map(lambda user: user[0], visible_users))
 
     async def _update_discovery_room(self) -> None:
         if not self._config.discovery_room:
             return
-        logger.info("Add missing users to discovery room: %s", self._config.discovery_room)
+        logger.info(
+            "Add missing users to discovery room: %s", self._config.discovery_room
+        )
 
         visible_users = await self._get_visible_users()
         logger.debug("Number of users on instance: %s", len(visible_users))
@@ -438,4 +438,19 @@ class RedListManager:
         joined_members = joined_members_with_profile.keys()
         logger.debug("Number of users in discovery room: %s", len(joined_members))
         users_missing_in_room = set(visible_users).difference(set(joined_members))
-        logger.debug("Number of missing users in discovery room: %s", len(users_missing_in_room))
+        logger.debug(
+            "Number of missing users in discovery room: %s", len(users_missing_in_room)
+        )
+
+        for index, user_id in enumerate(users_missing_in_room):
+            await self._maybe_change_membership_in_discovery_room(user_id, "join")
+            logger.info(
+                "%s/%s Adding user %s in discovery room",
+                index + 1,
+                len(users_missing_in_room),
+                user_id,
+            )
+        logger.info(
+            "Add missing users to discovery room: %s is completed",
+            self._config.discovery_room,
+        )
