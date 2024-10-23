@@ -13,7 +13,7 @@
 # limitations under the License.
 import logging
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union, Set
 
 import attr
 from synapse.module_api import (
@@ -45,6 +45,7 @@ class RedListManager:
         # Keep a reference to the config and Module API
         self._api = api
         self._config = config
+        self._state_storage_controller = self._api._hs.get_storage_controllers().state
 
         # Register callbacks
         self._api.register_account_data_callbacks(
@@ -68,6 +69,11 @@ class RedListManager:
             self._api.looping_background_call(self._add_expired_users, 60 * 60 * 1000)
             self._api.looping_background_call(
                 self._remove_renewed_users, 60 * 60 * 1000
+            )
+
+        if self._config.discovery_room:
+            self._api.looping_background_call(
+                self._update_discovery_room, 60 * 60 * 1000
             )
 
     @staticmethod
@@ -387,4 +393,64 @@ class RedListManager:
         return await self._api.run_db_interaction(
             "tchap_red_list_get_status",
             _get_user_status_txn,
+        )
+
+    async def _get_visible_users(self) -> Set[str]:
+        """Selects active users who are not in the red list.
+
+        Returns:
+            A list of dictionaries, each with a user ID.
+        """
+
+        def select_users_txn(txn):
+            txn.execute(
+                """
+                SELECT u.name
+                FROM users u
+                LEFT JOIN tchap_red_list trl ON u.name = trl.user_id
+                WHERE u.deactivated = 0
+                AND trl.user_id is NULL
+                LIMIT 100
+                """,
+                (),
+            )
+            return txn.fetchall()
+
+        visible_users: List[Dict[str, Union[str, int]]] = (
+            await self._api.run_db_interaction("get_expired_users", select_users_txn)
+        )
+        return set(map(lambda user: user[0], visible_users))
+
+    async def _update_discovery_room(self) -> None:
+        if not self._config.discovery_room:
+            return
+        logger.info(
+            "Add missing users to discovery room: %s", self._config.discovery_room
+        )
+
+        visible_users = await self._get_visible_users()
+        logger.debug("Number of users on instance: %s", len(visible_users))
+        joined_members_with_profile = (
+            await self._state_storage_controller.get_users_in_room_with_profiles(
+                self._config.discovery_room
+            )
+        )
+        joined_members = joined_members_with_profile.keys()
+        logger.debug("Number of users in discovery room: %s", len(joined_members))
+        users_missing_in_room = set(visible_users).difference(set(joined_members))
+        logger.debug(
+            "Number of missing users in discovery room: %s", len(users_missing_in_room)
+        )
+
+        for index, user_id in enumerate(users_missing_in_room):
+            await self._maybe_change_membership_in_discovery_room(user_id, "join")
+            logger.info(
+                "%s/%s Adding user %s in discovery room",
+                index + 1,
+                len(users_missing_in_room),
+                user_id,
+            )
+        logger.info(
+            "Add missing users to discovery room: %s is completed",
+            self._config.discovery_room,
         )
