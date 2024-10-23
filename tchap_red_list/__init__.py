@@ -13,7 +13,7 @@
 # limitations under the License.
 import logging
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union, Set
 
 import attr
 from synapse.module_api import (
@@ -26,6 +26,9 @@ from synapse.module_api import (
     run_in_background,
 )
 from synapse.module_api.errors import ConfigError, SynapseError
+from synapse.types import (
+    create_requester,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,11 +43,12 @@ class RedListManagerConfig:
 
 class RedListManager:
     def __init__(
-        self, config: RedListManagerConfig, api: ModuleApi, setup_db: bool = True
+            self, config: RedListManagerConfig, api: ModuleApi, setup_db: bool = True
     ):
         # Keep a reference to the config and Module API
         self._api = api
         self._config = config
+        self._state_storage_controller = self._api._hs.get_storage_controllers().state
 
         # Register callbacks
         self._api.register_account_data_callbacks(
@@ -70,16 +74,19 @@ class RedListManager:
                 self._remove_renewed_users, 60 * 60 * 1000
             )
 
+        if self._config.discovery_room:
+            self._api.looping_background_call(self._update_discovery_room, 60 * 60 * 1000)
+
     @staticmethod
     def parse_config(config: Dict[str, Any]) -> RedListManagerConfig:
         return RedListManagerConfig(**config)
 
     async def update_red_list_status(
-        self,
-        user_id: str,
-        room_id: Optional[str],
-        account_data_type: str,
-        content: JsonDict,
+            self,
+            user_id: str,
+            room_id: Optional[str],
+            account_data_type: str,
+            content: JsonDict,
     ) -> None:
         """Update a user's status in the red list when their account data changes.
         Implements the on_account_data_updated account data callback.
@@ -110,7 +117,7 @@ class RedListManager:
                 await self._remove_from_red_list(user_id)
 
     async def _maybe_change_membership_in_discovery_room(
-        self, user_id: str, membership: str
+            self, user_id: str, membership: str
     ) -> None:
         """Change a user's membership in the discovery room.
 
@@ -282,9 +289,9 @@ class RedListManager:
         )
 
     async def _add_to_red_list(
-        self,
-        user_id: str,
-        because_expired: bool = False,
+            self,
+            user_id: str,
+            because_expired: bool = False,
     ) -> None:
         """Add the given user to the red list.
 
@@ -388,3 +395,47 @@ class RedListManager:
             "tchap_red_list_get_status",
             _get_user_status_txn,
         )
+
+    async def _get_visible_users(self) -> Set[str]:
+        """Selects active users who are not in the red list.
+
+        Returns:
+            A list of dictionaries, each with a user ID.
+        """
+
+        def select_users_txn(txn):
+            txn.execute(
+                """
+                SELECT u.name
+                FROM users u
+                LEFT JOIN tchap_red_list trl ON u.name = trl.user_id
+                WHERE u.deactivated = 0
+                AND trl.user_id is NULL
+                LIMIT 1000
+                """,
+                (),
+            )
+            return txn.fetchall()
+
+        visible_users: List[Dict[str, Union[str, int]]] = await self._api.run_db_interaction(
+            "get_expired_users",
+            select_users_txn
+        )
+        return set(map(lambda user: user[0], visible_users))
+
+    async def _update_discovery_room(self) -> None:
+        if not self._config.discovery_room:
+            return
+        logger.info("Add missing users to discovery room: %s", self._config.discovery_room)
+
+        visible_users = await self._get_visible_users()
+        logger.debug("Number of users on instance: %s", len(visible_users))
+        joined_members_with_profile = (
+            await self._state_storage_controller.get_users_in_room_with_profiles(
+                self._config.discovery_room
+            )
+        )
+        joined_members = joined_members_with_profile.keys()
+        logger.debug("Number of users in discovery room: %s", len(joined_members))
+        users_missing_in_room = set(visible_users).difference(set(joined_members))
+        logger.debug("Number of missing users in discovery room: %s", len(users_missing_in_room))
