@@ -18,11 +18,33 @@ import aiounittest
 from synapse.module_api import JsonDict
 
 from tchap_red_list import ACCOUNT_DATA_TYPE, RedListManager
-from tests import create_module
+from tests import create_module, SQLiteStore, make_awaitable
 
 
 class RedListTestCase(aiounittest.AsyncTestCase):
     user_id = "@alice:example"
+    already_in_discovery_room_user = "@already_in_discovery_room_user:example"
+
+    def _setup_synapse_db(self, store: SQLiteStore) -> None:
+        """Create a table mocking the one created by synapse-email-account-validity,
+        except only with the columns used by the red list module, and populate it.
+
+        Args:
+            store: the store to use to create and populate the table.
+        """
+        txn = store.conn.cursor()
+
+        txn.execute(
+            "INSERT INTO users(name, deactivated) VALUES(?, ?)",
+            (self.user_id, 0),
+        )
+
+        txn.execute(
+            "INSERT INTO users(name, deactivated) VALUES(?, ?)",
+            (self.already_in_discovery_room_user, 0),
+        )
+
+        store.conn.commit()
 
     async def test_other_data_type(self) -> None:
         """Tests that incoming account data with a different account data type than the
@@ -227,3 +249,27 @@ class RedListTestCase(aiounittest.AsyncTestCase):
         api.run_db_interaction.reset_mock()
         api.update_room_membership.reset_mock()
         return module, api
+
+    async def test_update_discovery_room(self) -> None:
+        """Tests adding a user to the red list (with a discovery room)"""
+        room_id = "!someroom:test"
+        module, api, store = await create_module({"discovery_room": room_id})
+        api._hs.get_storage_controllers().state.get_users_in_room_with_profiles.return_value = make_awaitable(
+            {self.already_in_discovery_room_user: ()}
+        )
+        self._setup_synapse_db(store)
+
+        await module._update_discovery_room()
+
+        self.assertEqual(
+            api.run_db_interaction.call_count, 1, api.run_db_interaction.mock_calls
+        )
+        api.update_room_membership.assert_called_once_with(
+            sender=self.user_id,
+            target=self.user_id,
+            room_id=room_id,
+            new_membership="join",
+        )
+
+        in_list, _ = await module._get_user_status(self.user_id)
+        self.assertFalse(in_list)

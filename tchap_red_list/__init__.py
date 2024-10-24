@@ -194,7 +194,10 @@ class RedListManager:
         for user in users_added:
             await self._api.invalidate_cache(self._get_user_status, (user,))
             await self._maybe_change_membership_in_discovery_room(user, "leave")
-        logger.info("Add expired users to red list is completed : %s have been added", len(users_added))
+        logger.info(
+            "Add expired users to red list is completed : %s have been added",
+            len(users_added),
+        )
 
     async def _remove_renewed_users(self) -> None:
         """Remove users from the red list if they have been added by _add_expired_users
@@ -442,10 +445,10 @@ class RedListManager:
                 SELECT u.name
                 FROM users u
                 LEFT JOIN tchap_red_list trl ON u.name = trl.user_id
-                LEFT JOIN email_account_validity eav ON eav.user_id = trl.user_id
+                LEFT JOIN email_account_validity eav ON u.name = eav.user_id
                 WHERE u.deactivated = 0
                 AND trl.user_id is NULL
-                AND eav.expiration_ts_ms > ?
+                AND (eav.expiration_ts_ms > ? OR eav.user_id is NULL)
                 LIMIT 100
                 """,
                 (now_ms,),

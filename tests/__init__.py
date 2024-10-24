@@ -96,6 +96,49 @@ async def invalidate_cache(cached_func, keys):
     cached_func.invalidate(keys)
 
 
+async def _setup_synapse_db(store: SQLiteStore) -> None:
+    """Create a table mocking the one created by synapse-email-account-validity,
+    except only with the columns used by the red list module, and populate it.
+
+    Args:
+        store: the store to use to create and populate the table.
+    """
+    txn = store.conn.cursor()
+
+    txn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            name text,
+            password_hash text,
+            creation_ts bigint,
+            admin smallint DEFAULT 0 NOT NULL,
+            upgrade_ts bigint,
+            is_guest smallint DEFAULT 0 NOT NULL,
+            appservice_id text,
+            consent_version text,
+            consent_server_notice_sent text,
+            user_type text,
+            deactivated smallint DEFAULT 0 NOT NULL,
+            shadow_banned boolean,
+            consent_ts bigint
+        );
+        """,
+        (),
+    )
+
+    txn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS email_account_validity(
+            user_id TEXT PRIMARY KEY,
+            expiration_ts_ms BIGINT NOT NULL
+        )
+        """,
+        (),
+    )
+
+    store.conn.commit()
+
+
 async def create_module(
     config: Optional[JsonDict] = None,
 ) -> Tuple[RedListManager, Mock, SQLiteStore]:
@@ -118,6 +161,7 @@ async def create_module(
     module_api.run_db_interaction.side_effect = store.run_db_interaction
     module_api.update_room_membership.return_value = make_awaitable(None)
     module_api.invalidate_cache.side_effect = invalidate_cache
+
     # If necessary, give parse_config some configuration to parse.
     raw_config = config if config is not None else {}
     parsed_config = RedListManager.parse_config(raw_config)
@@ -125,6 +169,7 @@ async def create_module(
     # Set up the database table in a separate step, to ensure it's ready to be used when
     # we run the tests.
     module = RedListManager(parsed_config, module_api, setup_db=False)
+    await _setup_synapse_db(store)
     await module._setup_db()
 
     # Instantiating the module will set up the database, which will call
