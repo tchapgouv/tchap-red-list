@@ -14,7 +14,7 @@
 import sqlite3
 from asyncio import Future
 from typing import Any, Awaitable, Callable, Optional, Tuple, TypeVar
-from unittest.mock import Mock
+from unittest.mock import Mock, MagicMock
 
 from synapse.module_api import JsonDict, ModuleApi
 
@@ -92,6 +92,10 @@ def make_awaitable(result: TV) -> Awaitable[TV]:
     return future
 
 
+async def invalidate_cache(cached_func, keys):
+    cached_func.invalidate(keys)
+
+
 async def create_module(
     config: Optional[JsonDict] = None,
 ) -> Tuple[RedListManager, Mock, SQLiteStore]:
@@ -109,10 +113,11 @@ async def create_module(
 
     # Create a mock based on the ModuleApi spec, but override some mocked functions
     # because some capabilities are needed for running the tests.
-    module_api = Mock(spec=ModuleApi)
+    hs = MagicMock()
+    module_api = Mock(spec=ModuleApi(hs, None))
     module_api.run_db_interaction.side_effect = store.run_db_interaction
     module_api.update_room_membership.return_value = make_awaitable(None)
-
+    module_api.invalidate_cache.side_effect = invalidate_cache
     # If necessary, give parse_config some configuration to parse.
     raw_config = config if config is not None else {}
     parsed_config = RedListManager.parse_config(raw_config)
