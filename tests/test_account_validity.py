@@ -16,12 +16,38 @@ import time
 import aiounittest
 
 from tchap_red_list import ACCOUNT_DATA_TYPE
-from tests import SQLiteStore, create_module
+from tests import SQLiteStore, create_module, make_awaitable
 
 
 class AccountValidityRedListTestCase(aiounittest.AsyncTestCase):
     expired_user = "@expired:example.com"
     valid_user = "@valid:example.com"
+    already_in_discovery_room_user = "@already_in_discovery_room_user:example"
+
+    def _setup_synapse_db(self, store: SQLiteStore) -> None:
+        """Create a table mocking the one created by synapse-email-account-validity,
+        except only with the columns used by the red list module, and populate it.
+
+        Args:
+            store: the store to use to create and populate the table.
+        """
+        txn = store.conn.cursor()
+        txn.execute(
+            "INSERT INTO users(name, deactivated) VALUES(?, ?)",
+            (self.valid_user, 0),
+        )
+
+        txn.execute(
+            "INSERT INTO users(name, deactivated) VALUES(?, ?)",
+            (self.expired_user, 0),
+        )
+
+        txn.execute(
+            "INSERT INTO users(name, deactivated) VALUES(?, ?)",
+            (self.already_in_discovery_room_user, 0),
+        )
+
+        store.conn.commit()
 
     def _setup_account_validity(self, store: SQLiteStore) -> None:
         """Create a table mocking the one created by synapse-email-account-validity,
@@ -31,16 +57,6 @@ class AccountValidityRedListTestCase(aiounittest.AsyncTestCase):
             store: the store to use to create and populate the table.
         """
         txn = store.conn.cursor()
-
-        txn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS email_account_validity(
-                user_id TEXT PRIMARY KEY,
-                expiration_ts_ms BIGINT NOT NULL
-            )
-            """,
-            (),
-        )
 
         now_ms = int(time.time() * 1000)
 
@@ -169,3 +185,31 @@ class AccountValidityRedListTestCase(aiounittest.AsyncTestCase):
         in_list, because_expired = await module._get_user_status(self.expired_user)
         self.assertTrue(in_list)
         self.assertFalse(because_expired)
+
+    async def test_update_discovery_room_with_email_account_validity(self) -> None:
+        """Tests adding a user to the red list (with a discovery room)"""
+        room_id = "!someroom:test"
+
+        module, api, store = await create_module(
+            {"discovery_room": room_id, "use_email_account_validity": "true"}
+        )
+        api._hs.get_storage_controllers().state.get_users_in_room_with_profiles.return_value = make_awaitable(
+            {self.already_in_discovery_room_user: ()}
+        )
+        self._setup_synapse_db(store)
+        self._setup_account_validity(store)
+
+        await module._update_discovery_room_with_email_account_validity()
+
+        self.assertEqual(
+            api.run_db_interaction.call_count, 1, api.run_db_interaction.mock_calls
+        )
+        api.update_room_membership.assert_called_once_with(
+            sender=self.valid_user,
+            target=self.valid_user,
+            room_id=room_id,
+            new_membership="join",
+        )
+
+        in_list, _ = await module._get_user_status(self.valid_user)
+        self.assertFalse(in_list)

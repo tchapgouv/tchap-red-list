@@ -13,19 +13,22 @@
 # limitations under the License.
 import logging
 import time
-from typing import Any, Dict, List, Optional, Tuple, Union, Set
+from typing import Any, Dict, List, Optional, Tuple, Union, Set, Callable
 
 import attr
 from synapse.module_api import (
     DatabasePool,
     JsonDict,
-    LoggingTransaction,
     ModuleApi,
     UserProfile,
     cached,
     run_in_background,
+    P,
+    T,
 )
+from synapse.storage.database import LoggingTransaction
 from synapse.module_api.errors import ConfigError, SynapseError
+from typing_extensions import Concatenate
 
 logger = logging.getLogger(__name__)
 
@@ -70,11 +73,16 @@ class RedListManager:
             self._api.looping_background_call(
                 self._remove_renewed_users, 60 * 60 * 1000
             )
-
-        if self._config.discovery_room:
-            self._api.looping_background_call(
-                self._update_discovery_room, 60 * 60 * 1000
-            )
+            if self._config.discovery_room:
+                self._api.looping_background_call(
+                    self._update_discovery_room_with_email_account_validity,
+                    60 * 60 * 1000,
+                )
+        else:
+            if self._config.discovery_room:
+                self._api.looping_background_call(
+                    self._update_discovery_room, 60 * 60 * 1000
+                )
 
     @staticmethod
     def parse_config(config: Dict[str, Any]) -> RedListManagerConfig:
@@ -128,7 +136,7 @@ class RedListManager:
         """
         if self._config.discovery_room is None:
             return
-
+        logger.debug("Update discovery room : %s - %s", user_id, membership)
         await self._api.update_room_membership(
             sender=user_id,
             target=user_id,
@@ -149,9 +157,13 @@ class RedListManager:
         """Retrieve all expired users and adds them to the red list."""
 
         def add_expired_users_txn(txn: LoggingTransaction) -> List[str]:
-            # Retrieve all the expired users.
+            # Retrieve all the expired users and not in the red list.
             sql = """
-            SELECT user_id FROM email_account_validity WHERE expiration_ts_ms <= ? 
+            SELECT eav.user_id
+            FROM email_account_validity eav
+            LEFT JOIN tchap_red_list trl ON eav.user_id = trl.user_id
+            WHERE eav.expiration_ts_ms <= ?
+            AND trl.user_id is NULL
             LIMIT 100
             """
 
@@ -159,39 +171,19 @@ class RedListManager:
             txn.execute(sql, (now_ms,))
             expired_users_rows = txn.fetchall()
 
-            expired_users = [row[0] for row in expired_users_rows]
-
-            # Figure out which users are in the red list.
-            # We could also inspect the cache on self._get_user_status and only query the
-            # status of the users that aren't cached, but
-            #   1) it's probably digging too much into Synapse's internals (i.e. it could
-            #      easily break without warning)
-            #   2) it's not clear that there would be such a huge perf gain from doing
-            #      things this way.
-            red_list_users_rows = DatabasePool.simple_select_many_txn(
-                txn=txn,
-                table="tchap_red_list",
-                column="user_id",
-                iterable=expired_users,
-                keyvalues={},
-                retcols=["user_id"],
-            )
-
-            # Figure out which users we need to add to the red list by looking up whether
-            # they're already in it.
-            users_in_red_list = [row[0] for row in red_list_users_rows]
-            users_to_add = [
-                user for user in expired_users if user not in users_in_red_list
-            ]
+            expired_users_not_in_red_list = [row[0] for row in expired_users_rows]
 
             # Add all the expired users not in the red list.
             sql = """
             INSERT INTO tchap_red_list(user_id, because_expired) VALUES(?, ?)
             """
-            for user in users_to_add:
+            for user in expired_users_not_in_red_list:
                 txn.execute(sql, (user, True))
+                logger.debug("Add expired user %s to red list", user)
 
-            return users_to_add
+            return expired_users_not_in_red_list
+
+        logger.info("Add expired users to red list")
 
         users_added = await self._api.run_db_interaction(
             "tchap_red_list_hide_expired_users",
@@ -202,6 +194,10 @@ class RedListManager:
         for user in users_added:
             await self._api.invalidate_cache(self._get_user_status, (user,))
             await self._maybe_change_membership_in_discovery_room(user, "leave")
+        logger.info(
+            "Add expired users to red list is completed : %s have been added",
+            len(users_added),
+        )
 
     async def _remove_renewed_users(self) -> None:
         """Remove users from the red list if they have been added by _add_expired_users
@@ -396,14 +392,28 @@ class RedListManager:
             _get_user_status_txn,
         )
 
-    async def _get_visible_users(self) -> Set[str]:
+    async def _get_visible_users(
+        self, desc: str, select_users: Callable[Concatenate[LoggingTransaction, P], T]
+    ) -> Set[str]:
+        """Selects visible users.
+
+        Returns:
+            A list of dictionaries, each with a user ID.
+        """
+
+        visible_users: List[Dict[str, Union[str, int]]] = (
+            await self._api.run_db_interaction(desc, select_users)
+        )
+        return set(map(lambda user: user[0], visible_users))
+
+    async def _get_visible_users_not_in_red_list(self) -> Set[str]:
         """Selects active users who are not in the red list.
 
         Returns:
             A list of dictionaries, each with a user ID.
         """
 
-        def select_users_txn(txn):
+        def select_users_not_in_red_list_txn(txn):
             txn.execute(
                 """
                 SELECT u.name
@@ -417,10 +427,38 @@ class RedListManager:
             )
             return txn.fetchall()
 
-        visible_users: List[Dict[str, Union[str, int]]] = (
-            await self._api.run_db_interaction("get_expired_users", select_users_txn)
+        return await self._get_visible_users(
+            "get_visible_users_not_in_red_list", select_users_not_in_red_list_txn
         )
-        return set(map(lambda user: user[0], visible_users))
+
+    async def _get_visible_users_not_expired_not_in_red_list(self) -> Set[str]:
+        """Selects active users who are not in the red list and not expired.
+
+        Returns:
+            A list of dictionaries, each with a user ID.
+        """
+
+        def select_users_not_expired_not_in_red_list_txn(txn):
+            now_ms = int(time.time() * 1000)
+            txn.execute(
+                """
+                SELECT u.name
+                FROM users u
+                LEFT JOIN tchap_red_list trl ON u.name = trl.user_id
+                LEFT JOIN email_account_validity eav ON u.name = eav.user_id
+                WHERE u.deactivated = 0
+                AND trl.user_id is NULL
+                AND (eav.expiration_ts_ms > ? OR eav.user_id is NULL)
+                LIMIT 100
+                """,
+                (now_ms,),
+            )
+            return txn.fetchall()
+
+        return await self._get_visible_users(
+            "get_visible_users_not_expired_not_in_red_list",
+            select_users_not_expired_not_in_red_list_txn,
+        )
 
     async def _update_discovery_room(self) -> None:
         if not self._config.discovery_room:
@@ -429,7 +467,44 @@ class RedListManager:
             "Add missing users to discovery room: %s", self._config.discovery_room
         )
 
-        visible_users = await self._get_visible_users()
+        visible_users = await self._get_visible_users_not_in_red_list()
+        logger.debug("Number of users on instance: %s", len(visible_users))
+        joined_members_with_profile = (
+            await self._state_storage_controller.get_users_in_room_with_profiles(
+                self._config.discovery_room
+            )
+        )
+        joined_members = joined_members_with_profile.keys()
+        logger.debug("Number of users in discovery room: %s", len(joined_members))
+        users_missing_in_room = set(visible_users).difference(set(joined_members))
+        logger.debug(
+            "Number of missing users in discovery room: %s", len(users_missing_in_room)
+        )
+
+        for index, user_id in enumerate(users_missing_in_room):
+            await self._maybe_change_membership_in_discovery_room(user_id, "join")
+            logger.info(
+                "%s/%s Adding user %s in discovery room",
+                index + 1,
+                len(users_missing_in_room),
+                user_id,
+            )
+        logger.info(
+            "Add missing users to discovery room: %s is completed",
+            self._config.discovery_room,
+        )
+
+    async def _update_discovery_room_with_email_account_validity(self) -> None:
+        if (
+            not self._config.discovery_room
+            or not self._config.use_email_account_validity
+        ):
+            return
+        logger.info(
+            "Add missing users to discovery room: %s", self._config.discovery_room
+        )
+
+        visible_users = await self._get_visible_users_not_expired_not_in_red_list()
         logger.debug("Number of users on instance: %s", len(visible_users))
         joined_members_with_profile = (
             await self._state_storage_controller.get_users_in_room_with_profiles(
