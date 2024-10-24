@@ -136,7 +136,7 @@ class RedListManager:
         """
         if self._config.discovery_room is None:
             return
-
+        logger.debug("Update discovery room : %s - %s", user_id, membership)
         await self._api.update_room_membership(
             sender=user_id,
             target=user_id,
@@ -179,8 +179,11 @@ class RedListManager:
             """
             for user in expired_users_not_in_red_list:
                 txn.execute(sql, (user, True))
+                logger.debug("Add expired user %s to red list", user)
 
             return expired_users_not_in_red_list
+
+        logger.info("Add expired users to red list")
 
         users_added = await self._api.run_db_interaction(
             "tchap_red_list_hide_expired_users",
@@ -191,6 +194,7 @@ class RedListManager:
         for user in users_added:
             await self._api.invalidate_cache(self._get_user_status, (user,))
             await self._maybe_change_membership_in_discovery_room(user, "leave")
+        logger.info("Add expired users to red list is completed : %s have been added", len(users_added))
 
     async def _remove_renewed_users(self) -> None:
         """Remove users from the red list if they have been added by _add_expired_users
