@@ -69,6 +69,8 @@ class RedListManager:
             # the table to be accessed before it's fully created.
             run_in_background(self._setup_db)
 
+        # self._api.looping_background_call is taking too much time the next call is not scheduled
+        # https://github.com/element-hq/synapse/blob/ec885ffd334df29c99aaf722424d61a9e7739a1a/synapse/util/__init__.py#L130-L130
         if self._config.use_email_account_validity:
             self._api.looping_background_call(self._add_expired_users, 60 * 60 * 1000)
             self._api.looping_background_call(
