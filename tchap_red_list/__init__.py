@@ -314,6 +314,7 @@ class RedListManager:
 
         # If there is a room used for user discovery, make them leave it.
         await self._maybe_change_membership_in_discovery_room(user_id, "leave")
+        logger.debug("Add user %s to red list", user_id)
 
     async def _make_addition_permanent(self, user_id: str) -> None:
         """Update a user's addition to the red list to make it permanent so it's not
@@ -359,6 +360,7 @@ class RedListManager:
 
         # If there is a room used for user discovery, make them join it.
         await self._maybe_change_membership_in_discovery_room(user_id, "join")
+        logger.debug("Remove user %s from red list", user_id)
 
     @cached()
     async def _get_user_status(self, user_id: str) -> Tuple[bool, bool]:
@@ -425,9 +427,8 @@ class RedListManager:
                 WHERE u.deactivated = 0
                 AND trl.user_id is NULL
                 ORDER BY u.creation_ts DESC
-                LIMIT ?
                 """,
-                (self._config.sync_user_batch_size,),
+                (),
             )
             return txn.fetchall()
 
@@ -454,12 +455,8 @@ class RedListManager:
                 AND trl.user_id is NULL
                 AND (eav.expiration_ts_ms > ? OR eav.user_id is NULL)
                 ORDER BY u.creation_ts DESC
-                LIMIT ?
                 """,
-                (
-                    now_ms,
-                    self._config.sync_user_batch_size,
-                ),
+                (now_ms,),
             )
             return txn.fetchall()
 
@@ -476,7 +473,7 @@ class RedListManager:
         )
 
         visible_users = await self._get_visible_users_not_in_red_list()
-        logger.debug("Number of users on instance: %s", len(visible_users))
+        logger.debug("Number of users on homeserver: %s", len(visible_users))
         joined_members_with_profile = (
             await self._state_storage_controller.get_users_in_room_with_profiles(
                 self._config.discovery_room
@@ -485,16 +482,18 @@ class RedListManager:
         joined_members = joined_members_with_profile.keys()
         logger.debug("Number of users in discovery room: %s", len(joined_members))
         users_missing_in_room = set(visible_users).difference(set(joined_members))
-        logger.debug(
+        logger.info(
             "Number of missing users in discovery room: %s", len(users_missing_in_room)
         )
-
-        for index, user_id in enumerate(users_missing_in_room):
+        users_missing_in_room_batch = list(users_missing_in_room)[
+            : self._config.sync_user_batch_size
+        ]
+        for index, user_id in enumerate(users_missing_in_room_batch):
             await self._maybe_change_membership_in_discovery_room(user_id, "join")
             logger.info(
                 "%s/%s Adding user %s in discovery room",
                 index + 1,
-                len(users_missing_in_room),
+                len(users_missing_in_room_batch),
                 user_id,
             )
         logger.info(
@@ -513,7 +512,7 @@ class RedListManager:
         )
 
         visible_users = await self._get_visible_users_not_expired_not_in_red_list()
-        logger.debug("Number of users on instance: %s", len(visible_users))
+        logger.debug("Number of users on homeserver: %s", len(visible_users))
         joined_members_with_profile = (
             await self._state_storage_controller.get_users_in_room_with_profiles(
                 self._config.discovery_room
@@ -522,16 +521,18 @@ class RedListManager:
         joined_members = joined_members_with_profile.keys()
         logger.debug("Number of users in discovery room: %s", len(joined_members))
         users_missing_in_room = set(visible_users).difference(set(joined_members))
-        logger.debug(
+        logger.info(
             "Number of missing users in discovery room: %s", len(users_missing_in_room)
         )
-
-        for index, user_id in enumerate(users_missing_in_room):
+        users_missing_in_room_batch = list(users_missing_in_room)[
+            : self._config.sync_user_batch_size
+        ]
+        for index, user_id in enumerate(users_missing_in_room_batch):
             await self._maybe_change_membership_in_discovery_room(user_id, "join")
             logger.info(
                 "%s/%s Adding user %s in discovery room",
                 index + 1,
-                len(users_missing_in_room),
+                len(users_missing_in_room_batch),
                 user_id,
             )
         logger.info(
