@@ -29,9 +29,6 @@ modules:
       # ID of the room used for user discovery.
       # Optional, defaults to no room.
       discovery_room: "!someroom:example.com"
-      # Whether to enable compatibility with the synapse-email-account-validity module.
-      # Optional, defaults to false.
-      use_email_account_validity: false
 ```
 
 

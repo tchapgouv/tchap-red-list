@@ -38,7 +38,6 @@ ACCOUNT_DATA_TYPE = "im.vector.hide_profile"
 @attr.s(auto_attribs=True, frozen=True)
 class RedListManagerConfig:
     discovery_room: Optional[str] = None
-    use_email_account_validity: bool = False
 
 
 class RedListManager:
@@ -68,21 +67,10 @@ class RedListManager:
             # the table to be accessed before it's fully created.
             run_in_background(self._setup_db)
 
-        if self._config.use_email_account_validity:
-            self._api.looping_background_call(self._add_expired_users, 60 * 60 * 1000)
+        if self._config.discovery_room:
             self._api.looping_background_call(
-                self._remove_renewed_users, 60 * 60 * 1000
+                self._update_discovery_room, 60 * 60 * 1000
             )
-            if self._config.discovery_room:
-                self._api.looping_background_call(
-                    self._update_discovery_room_with_email_account_validity,
-                    60 * 60 * 1000,
-                )
-        else:
-            if self._config.discovery_room:
-                self._api.looping_background_call(
-                    self._update_discovery_room, 60 * 60 * 1000
-                )
 
     @staticmethod
     def parse_config(config: Dict[str, Any]) -> RedListManagerConfig:
@@ -153,107 +141,6 @@ class RedListManager:
         logger.debug(f"User {user_profile['user_id']} in red list={user_in_red_list}")
         return user_in_red_list
 
-    async def _add_expired_users(self) -> None:
-        """Retrieve all expired users and adds them to the red list."""
-
-        def add_expired_users_txn(txn: LoggingTransaction) -> List[str]:
-            # Retrieve all the expired users and not in the red list.
-            sql = """
-            SELECT eav.user_id
-            FROM email_account_validity eav
-            LEFT JOIN tchap_red_list trl ON eav.user_id = trl.user_id
-            WHERE eav.expiration_ts_ms <= ?
-            AND trl.user_id is NULL
-            LIMIT 100
-            """
-
-            now_ms = int(time.time() * 1000)
-            txn.execute(sql, (now_ms,))
-            expired_users_rows = txn.fetchall()
-
-            expired_users_not_in_red_list = [row[0] for row in expired_users_rows]
-
-            # Add all the expired users not in the red list.
-            sql = """
-            INSERT INTO tchap_red_list(user_id, because_expired) VALUES(?, ?)
-            """
-            for user in expired_users_not_in_red_list:
-                txn.execute(sql, (user, True))
-                logger.debug("Add expired user %s to red list", user)
-
-            return expired_users_not_in_red_list
-
-        logger.info("Add expired users to red list")
-
-        users_added = await self._api.run_db_interaction(
-            "tchap_red_list_hide_expired_users",
-            add_expired_users_txn,
-        )
-
-        # Make the expired users leave the discovery room if there's one.
-        for user in users_added:
-            await self._api.invalidate_cache(self._get_user_status, (user,))
-            await self._maybe_change_membership_in_discovery_room(user, "leave")
-        logger.info(
-            "Add expired users to red list is completed : %s have been added",
-            len(users_added),
-        )
-
-    async def _remove_renewed_users(self) -> None:
-        """Remove users from the red list if they have been added by _add_expired_users
-        and have since then renewed their account.
-        """
-
-        def remove_renewed_users_txn(txn: LoggingTransaction) -> List[str]:
-            # Retrieve the list of users we have previously added because their account
-            # expired.
-            rows = DatabasePool.simple_select_list_txn(
-                txn=txn,
-                table="tchap_red_list",
-                keyvalues={"because_expired": True},
-                retcols=["user_id"],
-            )
-
-            previously_expired_users = [row[0] for row in rows]
-
-            # Among these users, figure out which ones are still expired.
-            rows = DatabasePool.simple_select_many_txn(
-                txn=txn,
-                table="email_account_validity",
-                column="user_id",
-                iterable=previously_expired_users,
-                keyvalues={},
-                retcols=["user_id", "expiration_ts_ms"],
-            )
-
-            renewed_users: List[str] = []
-            now_ms = int(time.time() * 1000)
-            for row in rows:
-                if row[1] > now_ms:
-                    renewed_users.append(row[0])
-
-            # Remove the users who aren't expired anymore.
-            DatabasePool.simple_delete_many_txn(
-                txn=txn,
-                table="tchap_red_list",
-                column="user_id",
-                values=renewed_users,
-                keyvalues={},
-            )
-
-            return renewed_users
-
-        users_removed = await self._api.run_db_interaction(
-            "tchap_red_list_remove_renewed_users",
-            remove_renewed_users_txn,
-        )
-        for user in users_removed:
-            await self._api.invalidate_cache(self._get_user_status, (user,))
-
-        # Make the renewed users re-join the discovery room if there's one.
-        for user in users_removed:
-            await self._maybe_change_membership_in_discovery_room(user, "join")
-
     async def _setup_db(self) -> None:
         """Create the table needed to store the red list data.
 
@@ -269,15 +156,6 @@ class RedListManager:
             );
             """
             txn.execute(sql, ())
-
-            if self._config.use_email_account_validity:
-                try:
-                    txn.execute("SELECT * FROM email_account_validity LIMIT 0", ())
-                except SynapseError:
-                    raise ConfigError(
-                        "use_email_account_validity is set but no email account validity"
-                        " database table found."
-                    )
 
         await self._api.run_db_interaction(
             "tchap_red_list_setup_db",
@@ -468,43 +346,6 @@ class RedListManager:
         )
 
         visible_users = await self._get_visible_users_not_in_red_list()
-        logger.debug("Number of users on instance: %s", len(visible_users))
-        joined_members_with_profile = (
-            await self._state_storage_controller.get_users_in_room_with_profiles(
-                self._config.discovery_room
-            )
-        )
-        joined_members = joined_members_with_profile.keys()
-        logger.debug("Number of users in discovery room: %s", len(joined_members))
-        users_missing_in_room = set(visible_users).difference(set(joined_members))
-        logger.debug(
-            "Number of missing users in discovery room: %s", len(users_missing_in_room)
-        )
-
-        for index, user_id in enumerate(users_missing_in_room):
-            await self._maybe_change_membership_in_discovery_room(user_id, "join")
-            logger.info(
-                "%s/%s Adding user %s in discovery room",
-                index + 1,
-                len(users_missing_in_room),
-                user_id,
-            )
-        logger.info(
-            "Add missing users to discovery room: %s is completed",
-            self._config.discovery_room,
-        )
-
-    async def _update_discovery_room_with_email_account_validity(self) -> None:
-        if (
-            not self._config.discovery_room
-            or not self._config.use_email_account_validity
-        ):
-            return
-        logger.info(
-            "Add missing users to discovery room: %s", self._config.discovery_room
-        )
-
-        visible_users = await self._get_visible_users_not_expired_not_in_red_list()
         logger.debug("Number of users on instance: %s", len(visible_users))
         joined_members_with_profile = (
             await self._state_storage_controller.get_users_in_room_with_profiles(
