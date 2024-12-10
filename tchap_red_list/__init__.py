@@ -39,6 +39,7 @@ ACCOUNT_DATA_TYPE = "im.vector.hide_profile"
 class RedListManagerConfig:
     discovery_room: Optional[str] = None
     use_email_account_validity: bool = False
+    sync_user_batch_size: int = 100
 
 
 class RedListManager:
@@ -421,9 +422,10 @@ class RedListManager:
                 LEFT JOIN tchap_red_list trl ON u.name = trl.user_id
                 WHERE u.deactivated = 0
                 AND trl.user_id is NULL
-                LIMIT 100
+                ORDER BY u.creation_ts DESC
+                LIMIT ?
                 """,
-                (),
+                (self._config.sync_user_batch_size,),
             )
             return txn.fetchall()
 
@@ -449,9 +451,13 @@ class RedListManager:
                 WHERE u.deactivated = 0
                 AND trl.user_id is NULL
                 AND (eav.expiration_ts_ms > ? OR eav.user_id is NULL)
-                LIMIT 100
+                ORDER BY u.creation_ts DESC
+                LIMIT ?
                 """,
-                (now_ms,),
+                (
+                    now_ms,
+                    self._config.sync_user_batch_size,
+                ),
             )
             return txn.fetchall()
 
