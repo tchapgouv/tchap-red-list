@@ -32,6 +32,7 @@ modules:
       # Whether to enable compatibility with the synapse-email-account-validity module.
       # Optional, defaults to false.
       use_email_account_validity: false
+      sync_user_batch_size: 1000
 ```
 
 
