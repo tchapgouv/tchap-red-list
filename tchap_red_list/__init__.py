@@ -153,7 +153,7 @@ class RedListManager:
                 break
             except LimitExceededError:
                 logger.warning(
-                    "Update discovery room : %s - %s - %s - RateLimite has been reached",
+                    "Update discovery room : %s - %s - %s - RateLimit has been reached",
                     user_id,
                     membership,
                     retry_nb,
