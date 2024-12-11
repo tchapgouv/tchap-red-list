@@ -16,6 +16,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple, Union, Set, Callable
 
 import attr
+from synapse.api.errors import LimitExceededError
 from synapse.module_api import (
     DatabasePool,
     JsonDict,
@@ -50,6 +51,7 @@ class RedListManager:
         self._api = api
         self._config = config
         self._state_storage_controller = self._api._hs.get_storage_controllers().state
+        self._clock = self._api._hs.get_clock()
 
         # Register callbacks
         self._api.register_account_data_callbacks(
@@ -139,13 +141,24 @@ class RedListManager:
         """
         if self._config.discovery_room is None:
             return
-        logger.debug("Update discovery room : %s - %s", user_id, membership)
-        await self._api.update_room_membership(
-            sender=user_id,
-            target=user_id,
-            room_id=self._config.discovery_room,
-            new_membership=membership,
-        )
+
+        for retry_nb in range(10):
+            try:
+                await self._api.update_room_membership(
+                    sender=user_id,
+                    target=user_id,
+                    room_id=self._config.discovery_room,
+                    new_membership=membership,
+                )
+                break
+            except LimitExceededError:
+                logger.warning(
+                    "Update discovery room : %s - %s - %s - RateLimite has been reached",
+                    user_id,
+                    membership,
+                    retry_nb,
+                )
+                await self._clock.sleep(0.5 * retry_nb)
 
     async def check_user_in_red_list(self, user_profile: UserProfile) -> bool:
         """Check if a user should be in the red list, which means they need to be hidden
@@ -256,6 +269,7 @@ class RedListManager:
         # Make the renewed users re-join the discovery room if there's one.
         for user in users_removed:
             await self._maybe_change_membership_in_discovery_room(user, "join")
+            logger.debug("Add renewed user %s to discovery room", user)
 
     async def _setup_db(self) -> None:
         """Create the table needed to store the red list data.
