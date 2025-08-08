@@ -18,7 +18,7 @@ import aiounittest
 from synapse.module_api import JsonDict
 
 from tchap_red_list import ACCOUNT_DATA_TYPE, RedListManager
-from tests import create_module, SQLiteStore, make_awaitable
+from tests import SQLiteStore, create_module, make_awaitable
 
 
 class RedListTestCase(aiounittest.AsyncTestCase):

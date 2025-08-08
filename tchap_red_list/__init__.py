@@ -13,7 +13,7 @@
 # limitations under the License.
 import logging
 import time
-from typing import Any, Dict, List, Optional, Tuple, Union, Set, Callable
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 import attr
 from synapse.api.errors import LimitExceededError
@@ -21,14 +21,14 @@ from synapse.module_api import (
     DatabasePool,
     JsonDict,
     ModuleApi,
+    P,
+    T,
     UserProfile,
     cached,
     run_in_background,
-    P,
-    T,
 )
-from synapse.storage.database import LoggingTransaction
 from synapse.module_api.errors import ConfigError, SynapseError
+from synapse.storage.database import LoggingTransaction
 from typing_extensions import Concatenate
 
 logger = logging.getLogger(__name__)
@@ -49,6 +49,7 @@ class RedListManager:
     ):
         # Keep a reference to the config and Module API
         self._api = api
+        self.server_name = self._api.server_name
         self._config = config
         self._state_storage_controller = self._api._hs.get_storage_controllers().state
         self._clock = self._api._hs.get_clock()
@@ -159,6 +160,14 @@ class RedListManager:
                     retry_nb,
                 )
                 await self._clock.sleep(0.5 * retry_nb)
+            except RuntimeError as e:
+                logger.warning(
+                    "Cannot update discovery room : %s - %s : %s",
+                    user_id,
+                    membership,
+                    e,
+                )
+                break
 
     async def check_user_in_red_list(self, user_profile: UserProfile) -> bool:
         """Check if a user should be in the red list, which means they need to be hidden

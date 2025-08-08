@@ -14,7 +14,7 @@
 import sqlite3
 from asyncio import Future
 from typing import Any, Awaitable, Callable, Optional, Tuple, TypeVar
-from unittest.mock import Mock, MagicMock
+from unittest.mock import MagicMock, Mock
 
 from synapse.module_api import JsonDict, ModuleApi
 
