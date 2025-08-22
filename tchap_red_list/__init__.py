@@ -25,7 +25,6 @@ from synapse.module_api import (
     T,
     UserProfile,
     cached,
-    run_in_background,
 )
 from synapse.module_api.errors import ConfigError, SynapseError
 from synapse.storage.database import LoggingTransaction
@@ -70,7 +69,7 @@ class RedListManager:
             # We run this in the background because there's no other way to run async code
             # in __init__. However, this means we might have a race if something causes
             # the table to be accessed before it's fully created.
-            run_in_background(self._setup_db)
+            self._api.run_as_background_process(__name__ + ":_setup_db", self._setup_db)
 
         # self._api.looping_background_call is taking too much time the next call is not scheduled
         # https://github.com/element-hq/synapse/blob/ec885ffd334df29c99aaf722424d61a9e7739a1a/synapse/util/__init__.py#L130-L130
@@ -429,9 +428,9 @@ class RedListManager:
             A list of dictionaries, each with a user ID.
         """
 
-        visible_users: List[Dict[str, Union[str, int]]] = (
-            await self._api.run_db_interaction(desc, select_users)
-        )
+        visible_users: List[
+            Dict[str, Union[str, int]]
+        ] = await self._api.run_db_interaction(desc, select_users)
         return set(map(lambda user: user[0], visible_users))
 
     async def _get_visible_users_not_in_red_list(self) -> Set[str]:
