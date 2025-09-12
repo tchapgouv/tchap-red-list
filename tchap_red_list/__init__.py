@@ -142,7 +142,7 @@ class RedListManager:
         if self._config.discovery_room is None:
             return
 
-        for retry_nb in range(10):
+        for retry_nb in range(1, 11):
             try:
                 await self._api.update_room_membership(
                     sender=user_id,
