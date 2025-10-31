@@ -30,7 +30,7 @@ modules:
       # Optional, defaults to no discovery_room.
       discovery_room:
         active: "!discoroom3:example.com"
-        passive:
+        passives:
           - "!discoroom1:example.com"
           - "!discoroom2:example.com"
       # Whether to enable compatibility with the synapse-email-account-validity module.

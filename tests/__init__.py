@@ -161,6 +161,7 @@ async def create_module(
     module_api.run_db_interaction.side_effect = store.run_db_interaction
     module_api.update_room_membership.return_value = make_awaitable(None)
     module_api.invalidate_cache.side_effect = invalidate_cache
+    module_api._hs.get_storage_controllers().state.check_local_user_in_room.return_value = make_awaitable(True)
 
     # If necessary, give parse_config some configuration to parse.
     raw_config = config if config is not None else {}

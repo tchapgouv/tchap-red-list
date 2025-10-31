@@ -15,6 +15,7 @@ from typing import Optional, Tuple
 from unittest.mock import Mock
 
 import aiounittest
+from synapse.api.constants import Membership
 from synapse.module_api import JsonDict
 
 from tchap_red_list import ACCOUNT_DATA_TYPE, RedListManager
@@ -197,7 +198,7 @@ class RedListTestCase(aiounittest.AsyncTestCase):
             sender=self.user_id,
             target=self.user_id,
             room_id=room_id,
-            new_membership="leave",
+            new_membership=Membership.LEAVE,
         )
 
         in_list, _ = await module._get_user_status(self.user_id)
