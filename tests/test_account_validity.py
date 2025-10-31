@@ -191,7 +191,7 @@ class AccountValidityRedListTestCase(aiounittest.AsyncTestCase):
         room_id = "!someroom:test"
 
         module, api, store = await create_module(
-            {"discovery_room": room_id, "use_email_account_validity": "true"}
+            {"discovery_room": {"active": room_id}, "use_email_account_validity": "true"}
         )
         api._hs.get_storage_controllers().state.get_users_in_room_with_profiles.return_value = make_awaitable(
             {self.already_in_discovery_room_user: ()}

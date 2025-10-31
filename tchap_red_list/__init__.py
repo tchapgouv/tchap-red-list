@@ -36,8 +36,20 @@ ACCOUNT_DATA_TYPE = "im.vector.hide_profile"
 
 
 @attr.s(auto_attribs=True, frozen=True)
+class RedListManagerDiscoveryRoomConfig:
+    active: Optional[str] = None
+    passive: List[str] = []
+
+    def __attrs_post_init__(self):
+        if not self.active:
+            raise ConfigError(
+                        "discovery_room is set but discovery_room.active is not configured"
+                    )
+
+
+@attr.s(auto_attribs=True, frozen=True)
 class RedListManagerConfig:
-    discovery_room: Optional[str] = None
+    discovery_room: Optional[RedListManagerDiscoveryRoomConfig] = None
     use_email_account_validity: bool = False
     sync_user_batch_size: int = 100
 
@@ -91,7 +103,21 @@ class RedListManager:
 
     @staticmethod
     def parse_config(config: Dict[str, Any]) -> RedListManagerConfig:
-        return RedListManagerConfig(**config)
+        discovery_room = config.get("discovery_room")
+
+        if discovery_room:
+            if isinstance(discovery_room, dict):
+                discovery_room = RedListManagerDiscoveryRoomConfig(**discovery_room)
+            else:
+                raise ConfigError(
+                        "discovery_room is set but discovery_room.active is not configured"
+                    )
+
+        return RedListManagerConfig(
+            discovery_room=discovery_room,
+            use_email_account_validity=config.get("use_email_account_validity", False),
+            sync_user_batch_size=config.get("sync_user_batch_size", 100),
+        )
 
     async def update_red_list_status(
         self,
@@ -147,7 +173,7 @@ class RedListManager:
                 await self._api.update_room_membership(
                     sender=user_id,
                     target=user_id,
-                    room_id=self._config.discovery_room,
+                    room_id=self._config.discovery_room.active,
                     new_membership=membership,
                 )
                 break

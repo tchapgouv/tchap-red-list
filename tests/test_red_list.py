@@ -181,7 +181,7 @@ class RedListTestCase(aiounittest.AsyncTestCase):
     async def test_add_to_list_discovery(self) -> None:
         """Tests adding a user to the red list (with a discovery room)"""
         room_id = "!someroom:test"
-        module, api, _ = await create_module({"discovery_room": room_id})
+        module, api, _ = await create_module({"discovery_room": {"active": room_id}})
 
         await module.update_red_list_status(
             user_id=self.user_id,
@@ -207,7 +207,7 @@ class RedListTestCase(aiounittest.AsyncTestCase):
     async def test_remove_from_list_discovery(self) -> None:
         """Tests removing a user from the red list (with a discovery room)"""
         room_id = "!someroom:test"
-        module, api = await self._setup_user_in_list({"discovery_room": room_id})
+        module, api = await self._setup_user_in_list({"discovery_room": {"active": room_id}})
 
         await module.update_red_list_status(
             user_id=self.user_id,
@@ -253,7 +253,7 @@ class RedListTestCase(aiounittest.AsyncTestCase):
     async def test_update_discovery_room(self) -> None:
         """Tests adding a user to the red list (with a discovery room)"""
         room_id = "!someroom:test"
-        module, api, store = await create_module({"discovery_room": room_id})
+        module, api, store = await create_module({"discovery_room": {"active": room_id}})
         api._hs.get_storage_controllers().state.get_users_in_room_with_profiles.return_value = make_awaitable(
             {self.already_in_discovery_room_user: ()}
         )
