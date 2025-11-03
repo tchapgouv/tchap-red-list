@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import sqlite3
+import time
 from asyncio import Future
 from typing import Any, Awaitable, Callable, Optional, Tuple, TypeVar
 from unittest.mock import MagicMock, Mock
 
+import jinja2
 from synapse.module_api import JsonDict, ModuleApi
 
 from tchap_red_list import RedListManager
@@ -139,6 +141,23 @@ async def _setup_synapse_db(store: SQLiteStore) -> None:
     store.conn.commit()
 
 
+def read_templates(filenames, directory):
+    """Reads Jinja templates from the templates directory. This function is mostly copied
+    from Synapse.
+    """
+    loader = jinja2.FileSystemLoader(directory)
+    env = jinja2.Environment(
+        loader=loader,
+        autoescape=jinja2.select_autoescape(),
+    )
+
+    return [env.get_template(filename) for filename in filenames]
+
+
+async def send_mail(recipient, subject, html, text):
+    return None
+
+
 async def create_module(
     config: Optional[JsonDict] = None,
 ) -> Tuple[RedListManager, Mock, SQLiteStore]:
@@ -161,6 +180,8 @@ async def create_module(
     module_api.run_db_interaction.side_effect = store.run_db_interaction
     module_api.update_room_membership.return_value = make_awaitable(None)
     module_api.invalidate_cache.side_effect = invalidate_cache
+    module_api.read_templates.side_effect = read_templates
+    module_api.send_mail.side_effect = send_mail
     module_api._hs.get_storage_controllers().state.check_local_user_in_room.return_value = make_awaitable(
         True
     )

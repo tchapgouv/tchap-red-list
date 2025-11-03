@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from typing import Optional, Tuple
-from unittest.mock import Mock, AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import aiounittest
 from synapse.api.constants import Membership
@@ -25,6 +25,9 @@ from tests import SQLiteStore, create_module, make_awaitable
 class RedListTestCase(aiounittest.AsyncTestCase):
     user_id = "@alice:example"
     already_in_discovery_room_user = "@already_in_discovery_room_user:example"
+    fake_user_1 = "@fake_user_1:example"
+    fake_user_2 = "@fake_user_2:example"
+    fake_user_3 = "@fake_user_3:example"
 
     def _setup_synapse_db(self, store: SQLiteStore) -> None:
         """Create a table mocking the one created by synapse-email-account-validity,
@@ -328,8 +331,8 @@ class RedListTestCase(aiounittest.AsyncTestCase):
         module, api, store = await create_module(
             {"discovery_room": {"active": room_id1, "passives": [room_id2, room_id3]}}
         )
-        api._hs.get_storage_controllers().state.get_users_in_room_with_profiles = AsyncMock(
-            side_effect=lambda room_id: room_results.get(room_id, {})
+        api._hs.get_storage_controllers().state.get_users_in_room_with_profiles = (
+            AsyncMock(side_effect=lambda room_id: room_results.get(room_id, {}))
         )
         self._setup_synapse_db(store)
 
@@ -360,8 +363,8 @@ class RedListTestCase(aiounittest.AsyncTestCase):
         module, api, store = await create_module(
             {"discovery_room": {"active": room_id1, "passives": [room_id2, room_id3]}}
         )
-        api._hs.get_storage_controllers().state.get_users_in_room_with_profiles = AsyncMock(
-            side_effect=lambda room_id: room_results.get(room_id, {})
+        api._hs.get_storage_controllers().state.get_users_in_room_with_profiles = (
+            AsyncMock(side_effect=lambda room_id: room_results.get(room_id, {}))
         )
         self._setup_synapse_db(store)
 
@@ -373,6 +376,40 @@ class RedListTestCase(aiounittest.AsyncTestCase):
         api.update_room_membership.assert_not_called()
         in_list, _ = await module._get_user_status(self.user_id)
         self.assertFalse(in_list)
+
+    async def test_send_email(self):
+        room_id1 = "!someroom1:test"
+        room_id2 = "!someroom2:test"
+        room_id3 = "!someroom3:test"
+        room_results = {
+            room_id1: {
+                self.fake_user_1: (),
+                self.fake_user_2: (),
+                self.fake_user_3: (),
+            },
+            room_id2: {},
+            room_id3: {},
+        }
+        module, api, store = await create_module(
+            {
+                "discovery_room": {
+                    "active": room_id1,
+                    "passives": [room_id2, room_id3],
+                    "support_email": "support@homeserver",
+                    "active_room_max_size": 3,
+                },
+            }
+        )
+        api._hs.get_storage_controllers().state.get_users_in_room_with_profiles = (
+            AsyncMock(side_effect=lambda room_id: room_results.get(room_id, {}))
+        )
+
+        await module._update_discovery_room_with_red_list()
+
+        self.assertEqual(module._api.send_mail.call_count, 1)
+        _, kwargs = module._api.send_mail.call_args
+        self.assertNotEqual(kwargs["html"].find(room_id1), -1)
+        self.assertNotEqual(kwargs["text"].find(room_id1), -1)
 
     async def _setup_user_in_list(
         self, config: Optional[JsonDict] = None

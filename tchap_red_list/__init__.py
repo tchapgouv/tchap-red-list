@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+import os
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple, Union
 
@@ -42,6 +43,8 @@ ACCOUNT_DATA_TYPE = "im.vector.hide_profile"
 class RedListManagerDiscoveryRoomConfig:
     active: Optional[str] = None
     passives: List[str] = []
+    support_email: Optional[str] = None
+    active_room_max_size: int = 10000
 
     def all(self) -> List[str]:
         return [self.active] + self.passives
@@ -73,6 +76,10 @@ class RedListManager:
         self._config = config
         self._state_storage_controller = self._api._hs.get_storage_controllers().state
         self._clock = self._api._hs.get_clock()
+        (self._template_html, self._template_text,) = self._api.read_templates(
+            ["discovery_room_alert.html", "discovery_room_alert.txt"],
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates"),
+        )
 
         # Register callbacks
         self._api.register_account_data_callbacks(
@@ -582,13 +589,36 @@ class RedListManager:
                 )
             )
             joined_members = joined_members_with_profile.keys()
+            number_of_joined_members = len(joined_members)
             logger.debug(
                 "Number of users in discovery room %s/%s [%s]: %s",
                 index + 1,
                 number_of_discovery_rooms,
                 discovery_room_id,
-                len(joined_members),
+                number_of_joined_members,
             )
+            # Send email if active is room has reached limit in order to create other room
+            if (
+                self._config.discovery_room.support_email
+                and discovery_room_id == self._config.discovery_room.active
+                and number_of_joined_members
+                >= self._config.discovery_room.active_room_max_size
+            ):
+                template_vars = {
+                    "active_room_max_size": self._config.discovery_room.active_room_max_size,
+                    "active_room_id": self._config.discovery_room.active,
+                    "number_of_joined_members": number_of_joined_members,
+                }
+
+                html_text = self._template_html.render(**template_vars)
+                plain_text = self._template_text.render(**template_vars)
+                await self._api.send_mail(
+                    recipient=self._config.discovery_room.support_email,
+                    subject="{self.server_name} - Discovery Room has reached limit",
+                    html=html_text,
+                    text=plain_text,
+                )
+
             users_missing_in_room = users_missing_in_room.difference(
                 set(joined_members)
             )

@@ -33,6 +33,8 @@ modules:
         passives:
           - "!discoroom1:example.com"
           - "!discoroom2:example.com"
+        active_room_max_size: 10000
+        support_email: "support@example.com"
       # Whether to enable compatibility with the synapse-email-account-validity module.
       # Optional, defaults to false.
       use_email_account_validity: false
