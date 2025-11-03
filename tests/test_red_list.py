@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from typing import Optional, Tuple
-from unittest.mock import Mock
+from unittest.mock import Mock, AsyncMock
 
 import aiounittest
 from synapse.api.constants import Membership
@@ -179,7 +179,7 @@ class RedListTestCase(aiounittest.AsyncTestCase):
 
         self.assertFalse(in_list)
 
-    async def test_add_to_list_discovery(self) -> None:
+    async def test_add_to_list_with_one_discovery(self) -> None:
         """Tests adding a user to the red list (with a discovery room)"""
         room_id = "!someroom:test"
         module, api, _ = await create_module({"discovery_room": {"active": room_id}})
@@ -202,13 +202,43 @@ class RedListTestCase(aiounittest.AsyncTestCase):
         )
 
         in_list, _ = await module._get_user_status(self.user_id)
-
         self.assertTrue(in_list)
 
-    async def test_remove_from_list_discovery(self) -> None:
+    async def test_add_to_list_with_multi_discovery(self) -> None:
+        """Tests adding a user to the red list (with multiple discovery rooms)"""
+        room_id1 = "!someroom1:test"
+        room_id2 = "!someroom2:test"
+        room_id3 = "!someroom3:test"
+        module, api, store = await create_module(
+            {"discovery_room": {"active": room_id1, "passives": [room_id2, room_id3]}}
+        )
+
+        await module.update_red_list_status(
+            user_id=self.user_id,
+            room_id=None,
+            account_data_type=ACCOUNT_DATA_TYPE,
+            content={"hide_profile": True},
+        )
+
+        self.assertEqual(
+            api.run_db_interaction.call_count, 2, api.run_db_interaction.mock_calls
+        )
+        api.update_room_membership.assert_called_once_with(
+            sender=self.user_id,
+            target=self.user_id,
+            room_id=room_id1,
+            new_membership=Membership.LEAVE,
+        )
+
+        in_list, _ = await module._get_user_status(self.user_id)
+        self.assertTrue(in_list)
+
+    async def test_remove_from_list_with_one_discovery(self) -> None:
         """Tests removing a user from the red list (with a discovery room)"""
         room_id = "!someroom:test"
-        module, api = await self._setup_user_in_list({"discovery_room": {"active": room_id}})
+        module, api = await self._setup_user_in_list(
+            {"discovery_room": {"active": room_id}}
+        )
 
         await module.update_red_list_status(
             user_id=self.user_id,
@@ -224,11 +254,124 @@ class RedListTestCase(aiounittest.AsyncTestCase):
             sender=self.user_id,
             target=self.user_id,
             room_id=room_id,
-            new_membership="join",
+            new_membership=Membership.JOIN,
         )
 
         in_list, _ = await module._get_user_status(self.user_id)
+        self.assertFalse(in_list)
 
+    async def test_remove_from_list_with_multi_discovery(self) -> None:
+        """Tests removing a user from the red list (with multiple discovery rooms)"""
+        room_id1 = "!someroom1:test"
+        room_id2 = "!someroom2:test"
+        room_id3 = "!someroom3:test"
+        module, api = await self._setup_user_in_list(
+            {"discovery_room": {"active": room_id1, "passives": [room_id2, room_id3]}}
+        )
+
+        await module.update_red_list_status(
+            user_id=self.user_id,
+            room_id=None,
+            account_data_type=ACCOUNT_DATA_TYPE,
+            content={"hide_profile": False},
+        )
+
+        self.assertEqual(
+            api.run_db_interaction.call_count, 2, api.run_db_interaction.mock_calls
+        )
+        api.update_room_membership.assert_called_once_with(
+            sender=self.user_id,
+            target=self.user_id,
+            room_id=room_id1,
+            new_membership=Membership.JOIN,
+        )
+
+        in_list, _ = await module._get_user_status(self.user_id)
+        self.assertFalse(in_list)
+
+    async def test_update_with_one_discovery_room(self) -> None:
+        """Tests update the discovery room by adding `user_id` when `user_id` is not in the active discovery room"""
+        room_id = "!someroom:test"
+        module, api, store = await create_module(
+            {"discovery_room": {"active": room_id}}
+        )
+        api._hs.get_storage_controllers().state.get_users_in_room_with_profiles.return_value = make_awaitable(
+            {self.already_in_discovery_room_user: ()}
+        )
+        self._setup_synapse_db(store)
+
+        await module._update_discovery_room_with_red_list()
+
+        self.assertEqual(
+            api.run_db_interaction.call_count, 1, api.run_db_interaction.mock_calls
+        )
+        api.update_room_membership.assert_called_once_with(
+            sender=self.user_id,
+            target=self.user_id,
+            room_id=room_id,
+            new_membership=Membership.JOIN,
+        )
+
+        in_list, _ = await module._get_user_status(self.user_id)
+        self.assertFalse(in_list)
+
+    async def test_update_with_multi_discovery_room(self) -> None:
+        """Tests update the discovery room by adding `user_id` when `user_id` is not in any in discovery room"""
+        room_id1 = "!someroom1:test"
+        room_id2 = "!someroom2:test"
+        room_id3 = "!someroom3:test"
+        room_results = {
+            room_id1: {},
+            room_id2: {},
+            room_id3: {self.already_in_discovery_room_user: ()},
+        }
+        module, api, store = await create_module(
+            {"discovery_room": {"active": room_id1, "passives": [room_id2, room_id3]}}
+        )
+        api._hs.get_storage_controllers().state.get_users_in_room_with_profiles = AsyncMock(
+            side_effect=lambda room_id: room_results.get(room_id, {})
+        )
+        self._setup_synapse_db(store)
+
+        await module._update_discovery_room_with_red_list()
+
+        self.assertEqual(
+            api.run_db_interaction.call_count, 1, api.run_db_interaction.mock_calls
+        )
+        api.update_room_membership.assert_called_once_with(
+            sender=self.user_id,
+            target=self.user_id,
+            room_id=room_id1,
+            new_membership=Membership.JOIN,
+        )
+        in_list, _ = await module._get_user_status(self.user_id)
+        self.assertFalse(in_list)
+
+    async def test_no_update_with_multi_discovery_room(self) -> None:
+        """Tests no update of the discovery room when `user_id` is already in discovery room `room_id3`"""
+        room_id1 = "!someroom1:test"
+        room_id2 = "!someroom2:test"
+        room_id3 = "!someroom3:test"
+        room_results = {
+            room_id1: {self.user_id: ()},
+            room_id2: {},
+            room_id3: {self.already_in_discovery_room_user: ()},
+        }
+        module, api, store = await create_module(
+            {"discovery_room": {"active": room_id1, "passives": [room_id2, room_id3]}}
+        )
+        api._hs.get_storage_controllers().state.get_users_in_room_with_profiles = AsyncMock(
+            side_effect=lambda room_id: room_results.get(room_id, {})
+        )
+        self._setup_synapse_db(store)
+
+        await module._update_discovery_room_with_red_list()
+
+        self.assertEqual(
+            api.run_db_interaction.call_count, 1, api.run_db_interaction.mock_calls
+        )
+        api.update_room_membership.assert_not_called()
+        in_list, _ = await module._get_user_status(self.user_id)
         self.assertFalse(in_list)
 
     async def _setup_user_in_list(
@@ -250,27 +393,3 @@ class RedListTestCase(aiounittest.AsyncTestCase):
         api.run_db_interaction.reset_mock()
         api.update_room_membership.reset_mock()
         return module, api
-
-    async def test_update_discovery_room(self) -> None:
-        """Tests adding a user to the red list (with a discovery room)"""
-        room_id = "!someroom:test"
-        module, api, store = await create_module({"discovery_room": {"active": room_id}})
-        api._hs.get_storage_controllers().state.get_users_in_room_with_profiles.return_value = make_awaitable(
-            {self.already_in_discovery_room_user: ()}
-        )
-        self._setup_synapse_db(store)
-
-        await module._update_discovery_room()
-
-        self.assertEqual(
-            api.run_db_interaction.call_count, 1, api.run_db_interaction.mock_calls
-        )
-        api.update_room_membership.assert_called_once_with(
-            sender=self.user_id,
-            target=self.user_id,
-            room_id=room_id,
-            new_membership="join",
-        )
-
-        in_list, _ = await module._get_user_status(self.user_id)
-        self.assertFalse(in_list)
