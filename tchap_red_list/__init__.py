@@ -31,6 +31,7 @@ from synapse.module_api import (
 from synapse.module_api.errors import ConfigError, SynapseError
 from synapse.storage.database import LoggingTransaction
 from typing_extensions import Concatenate
+from pkg_resources import DistributionNotFound, get_distribution
 
 UPDATE_MEMBERSHIP_MAX_RETRY = 11
 
@@ -38,6 +39,11 @@ logger = logging.getLogger(__name__)
 
 ACCOUNT_DATA_TYPE = "im.vector.hide_profile"
 
+try:
+    __version__ = get_distribution(__name__).version
+except DistributionNotFound:
+    # package is not installed
+    pass
 
 @attr.s(auto_attribs=True, frozen=True)
 class RedListManagerDiscoveryRoomConfig:
