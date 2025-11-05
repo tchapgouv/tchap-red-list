@@ -29,16 +29,27 @@ modules:
       # ID of the room used for user discovery.
       # Optional, defaults to no discovery_room.
       discovery_room:
+        # Discovery room id that will be joined by users  
         active: "!discoroom3:example.com"
+        # Discovery room id list containing the rest of the users (only leave can be performed)
         passives:
           - "!discoroom1:example.com"
           - "!discoroom2:example.com"
+        # Send an alert email when `active_room_max_size` is reached
         active_room_max_size: 10000
+        # Recipient of the alert email
         support_email: "support@example.com"
+        # Whether to enable removing of red list users from discovery rooms (prevent consistency issue)
+        # Could be high in performance  
+        # Optional, defaults to false.  
+        sync_red_list: false
       # Whether to enable compatibility with the synapse-email-account-validity module.
       # Optional, defaults to false.
       use_email_account_validity: false
+      # Add user in discovery room by batch of `sync_user_batch_size`
       sync_user_batch_size: 1000
+      # All background jobs will be executed every `job_interval_in_minutes` minutes
+      job_interval_in_minutes: 60
 ```
 
 

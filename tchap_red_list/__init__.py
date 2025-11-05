@@ -52,6 +52,7 @@ class RedListManagerDiscoveryRoomConfig:
     passives: List[str] = []
     support_email: Optional[str] = None
     active_room_max_size: int = 10000
+    sync_red_list: bool = False
 
     def all(self) -> List[str]:
         return [self.active] + self.passives
@@ -68,6 +69,7 @@ class RedListManagerConfig:
     discovery_room: Optional[RedListManagerDiscoveryRoomConfig] = None
     use_email_account_validity: bool = False
     sync_user_batch_size: int = 100
+    job_interval_in_minutes: int = 60
 
     def is_discovery_room_feature_enabled(self) -> bool:
         return self.discovery_room is not None
@@ -112,19 +114,24 @@ class RedListManager:
         # self._api.looping_background_call is taking too much time the next call is not scheduled
         # https://github.com/element-hq/synapse/blob/ec885ffd334df29c99aaf722424d61a9e7739a1a/synapse/util/__init__.py#L130-L130
         if self._config.use_email_account_validity:
-            self._api.looping_background_call(self._add_expired_users, 60 * 60 * 1000)
             self._api.looping_background_call(
-                self._remove_renewed_users, 60 * 60 * 1000
+                self._add_expired_users,
+                self._config.job_interval_in_minutes * 60 * 1000,
+            )
+            self._api.looping_background_call(
+                self._remove_renewed_users,
+                self._config.job_interval_in_minutes * 60 * 1000,
             )
             if self._config.is_discovery_room_feature_enabled():
                 self._api.looping_background_call(
                     self._update_discovery_room_with_red_list_and_email_account_validity,
-                    60 * 60 * 1000,
+                    self._config.job_interval_in_minutes * 60 * 1000,
                 )
         else:
             if self._config.is_discovery_room_feature_enabled():
                 self._api.looping_background_call(
-                    self._update_discovery_room_with_red_list, 60 * 60 * 1000
+                    self._update_discovery_room_with_red_list,
+                    self._config.job_interval_in_minutes * 60 * 1000,
                 )
 
     @staticmethod
@@ -143,6 +150,7 @@ class RedListManager:
             discovery_room=discovery_room,
             use_email_account_validity=config.get("use_email_account_validity", False),
             sync_user_batch_size=config.get("sync_user_batch_size", 100),
+            job_interval_in_minutes=config.get("job_interval_in_minutes", 60)
         )
 
     async def update_red_list_status(
@@ -496,19 +504,19 @@ class RedListManager:
             _get_user_status_txn,
         )
 
-    async def _get_visible_users(
+    async def _select_users(
         self, desc: str, select_users: Callable[Concatenate[LoggingTransaction, P], T]
     ) -> Set[str]:
-        """Selects visible users.
+        """Selects users.
 
         Returns:
             A list of dictionaries, each with a user ID.
         """
 
-        visible_users: List[
-            Dict[str, Union[str, int]]
-        ] = await self._api.run_db_interaction(desc, select_users)
-        return set(map(lambda user: user[0], visible_users))
+        users: List[Dict[str, Union[str, int]]] = await self._api.run_db_interaction(
+            desc, select_users
+        )
+        return set(map(lambda user: user[0], users))
 
     async def _get_visible_users_not_in_red_list(self) -> Set[str]:
         """Selects active users who are not in the red list.
@@ -531,8 +539,32 @@ class RedListManager:
             )
             return txn.fetchall()
 
-        return await self._get_visible_users(
+        return await self._select_users(
             "get_visible_users_not_in_red_list", select_users_not_in_red_list_txn
+        )
+
+    async def _get_users_in_red_list(self) -> Set[str]:
+        """Selects active users who are in the red list.
+
+        Returns:
+            A list of dictionaries, each with a user ID.
+        """
+
+        def select_users_in_red_list_txn(txn):
+            txn.execute(
+                """
+                SELECT trl.user_id
+                FROM tchap_red_list trl
+                LEFT JOIN users u ON u.name = trl.user_id
+                WHERE u.deactivated = 0
+                ORDER BY u.creation_ts DESC
+                """,
+                (),
+            )
+            return txn.fetchall()
+
+        return await self._select_users(
+            "_get_users_in_red_list", select_users_in_red_list_txn
         )
 
     async def _get_visible_users_not_expired_not_in_red_list(self) -> Set[str]:
@@ -559,7 +591,7 @@ class RedListManager:
             )
             return txn.fetchall()
 
-        return await self._get_visible_users(
+        return await self._select_users(
             "get_visible_users_not_expired_not_in_red_list",
             select_users_not_expired_not_in_red_list_txn,
         )
@@ -594,6 +626,24 @@ class RedListManager:
     async def _update_discovery_room(
         self, get_visible_users_fn: Callable[[], Awaitable[Set[str]]]
     ) -> None:
+        # Synchronize Red List in case we have an issue
+        if self._config.discovery_room.sync_red_list:
+            users_in_red_list = self._get_users_in_red_list()
+            number_users_in_red_list = len(users_in_red_list)
+            logger.info(
+                "Synchronize Red List: Number of user on red list that will Leave from all discovery rooms: %s",
+                number_users_in_red_list,
+            )
+            for index, user_id in enumerate(users_in_red_list):
+                await self._change_membership_in_discovery_room(
+                    user_id, Membership.LEAVE
+                )
+                logger.debug(
+                    "Synchronize Red List - [%s/%s users] - %s left all discovery rooms",
+                    index + 1,
+                    number_users_in_red_list,
+                    user_id,
+                )
         # Get visible users
         visible_users = await get_visible_users_fn()
         logger.debug("Number of users on homeserver: %s", len(visible_users))
@@ -631,9 +681,16 @@ class RedListManager:
                 plain_text = self._template_text.render(**template_vars)
                 await self._api.send_mail(
                     recipient=self._config.discovery_room.support_email,
-                    subject="{self.server_name} - Discovery Room has reached limit",
+                    subject=f"{self.server_name} - Discovery Room has reached limit",
                     html=html_text,
                     text=plain_text,
+                )
+                logger.debug(
+                    "Send an alert email to %s [quota=%s, active_discovery_room=%s, number_of_joined_members=%s]",
+                    self._config.discovery_room.support_email,
+                    self._config.discovery_room.active_room_max_size,
+                    self._config.discovery_room.active,
+                    number_of_joined_members,
                 )
 
             users_missing_in_room = users_missing_in_room.difference(

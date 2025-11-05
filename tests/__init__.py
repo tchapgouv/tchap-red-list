@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import sqlite3
-import time
 from asyncio import Future
 from typing import Any, Awaitable, Callable, Optional, Tuple, TypeVar
 from unittest.mock import MagicMock, Mock
