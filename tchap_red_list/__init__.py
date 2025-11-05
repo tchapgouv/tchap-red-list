@@ -17,6 +17,7 @@ import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple, Union
 
 import attr
+from pkg_resources import DistributionNotFound, get_distribution
 from synapse.api.constants import Membership
 from synapse.api.errors import LimitExceededError
 from synapse.module_api import (
@@ -31,7 +32,6 @@ from synapse.module_api import (
 from synapse.module_api.errors import ConfigError, SynapseError
 from synapse.storage.database import LoggingTransaction
 from typing_extensions import Concatenate
-from pkg_resources import DistributionNotFound, get_distribution
 
 UPDATE_MEMBERSHIP_MAX_RETRY = 11
 
@@ -44,6 +44,7 @@ try:
 except DistributionNotFound:
     # package is not installed
     pass
+
 
 @attr.s(auto_attribs=True, frozen=True)
 class RedListManagerDiscoveryRoomConfig:
@@ -176,7 +177,7 @@ class RedListManager:
             else:
                 await self._remove_from_red_list(user_id)
 
-    async def _maybe_change_membership_in_discovery_room(
+    async def _change_membership_in_discovery_room(
         self, user_id: str, membership: str
     ) -> None:
         """Change a user's membership in the discovery room.
@@ -186,32 +187,43 @@ class RedListManager:
         Args:
             user_id: the user to change the membership of.
             membership: the membership to set for this user.
+                - JOIN only on the active discovery room
+                - LEAVE on all discovery room if user is present
         """
         if not self._config.is_discovery_room_feature_enabled():
             return
 
         for retry_nb in range(1, UPDATE_MEMBERSHIP_MAX_RETRY):
             try:
-                room_id = None
                 # Performs join only on the active discovery room
                 if membership == Membership.JOIN:
-                    room_id = self._config.discovery_room.active
-                # Performs leave on all discovery room if user is present
-                elif membership == Membership.LEAVE:
-                    for candidate in self._config.discovery_room.all():
-                        is_user_in_room = await self._state_storage_controller.check_local_user_in_room(
-                            user_id, candidate
-                        )
-                        if is_user_in_room:
-                            room_id = candidate
-                            break
-                if room_id:
                     await self._api.update_room_membership(
                         sender=user_id,
                         target=user_id,
-                        room_id=room_id,
+                        room_id=self._config.discovery_room.active,
                         new_membership=membership,
                     )
+                    logger.debug(
+                        "User [%s] joined Active Discovery Room: %s",
+                        user_id,
+                        self._config.discovery_room.active,
+                    )
+                # Performs leave on all discovery room if user is present
+                elif membership == Membership.LEAVE:
+                    for room_id in self._config.discovery_room.all():
+                        is_user_in_room = await self._state_storage_controller.check_local_user_in_room(
+                            user_id, room_id
+                        )
+                        if is_user_in_room:
+                            await self._api.update_room_membership(
+                                sender=user_id,
+                                target=user_id,
+                                room_id=room_id,
+                                new_membership=membership,
+                            )
+                            logger.debug(
+                                "User [%s] left Discovery Room: %s", user_id, room_id
+                            )
                 break
             except LimitExceededError:
                 logger.warning(
@@ -279,9 +291,7 @@ class RedListManager:
         # Make the expired users leave the discovery room if there's one.
         for user in users_added:
             await self._api.invalidate_cache(self._get_user_status, (user,))
-            await self._maybe_change_membership_in_discovery_room(
-                user, Membership.LEAVE
-            )
+            await self._change_membership_in_discovery_room(user, Membership.LEAVE)
         logger.info(
             "Add expired users to red list is completed : %s have been added",
             len(users_added),
@@ -340,7 +350,7 @@ class RedListManager:
 
         # Make the renewed users re-join the discovery room if there's one.
         for user in users_removed:
-            await self._maybe_change_membership_in_discovery_room(user, Membership.JOIN)
+            await self._change_membership_in_discovery_room(user, Membership.JOIN)
             logger.debug("Add renewed user %s to discovery room", user)
 
     async def _setup_db(self) -> None:
@@ -399,7 +409,7 @@ class RedListManager:
         await self._api.invalidate_cache(self._get_user_status, (user_id,))
 
         # If there is a room used for user discovery, make them leave it.
-        await self._maybe_change_membership_in_discovery_room(user_id, Membership.LEAVE)
+        await self._change_membership_in_discovery_room(user_id, Membership.LEAVE)
         logger.debug("Add user %s to red list", user_id)
 
     async def _make_addition_permanent(self, user_id: str) -> None:
@@ -445,7 +455,7 @@ class RedListManager:
         await self._api.invalidate_cache(self._get_user_status, (user_id,))
 
         # If there is a room used for user discovery, make them join it.
-        await self._maybe_change_membership_in_discovery_room(user_id, Membership.JOIN)
+        await self._change_membership_in_discovery_room(user_id, Membership.JOIN)
         logger.debug("Remove user %s from red list", user_id)
 
     @cached()
@@ -644,9 +654,7 @@ class RedListManager:
             : self._config.sync_user_batch_size
         ]
         for index, user_id in enumerate(users_missing_in_room_batch):
-            await self._maybe_change_membership_in_discovery_room(
-                user_id, Membership.JOIN
-            )
+            await self._change_membership_in_discovery_room(user_id, Membership.JOIN)
             logger.info(
                 "%s/%s Adding user %s in discovery room",
                 index + 1,

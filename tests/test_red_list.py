@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from typing import Optional, Tuple
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, call
 
 import aiounittest
 from synapse.api.constants import Membership
@@ -186,6 +186,9 @@ class RedListTestCase(aiounittest.AsyncTestCase):
         """Tests adding a user to the red list (with a discovery room)"""
         room_id = "!someroom:test"
         module, api, _ = await create_module({"discovery_room": {"active": room_id}})
+        api._hs.get_storage_controllers().state.check_local_user_in_room = AsyncMock(
+            side_effect=lambda i_user_id, i_room_id: True
+        )
 
         await module.update_red_list_status(
             user_id=self.user_id,
@@ -215,6 +218,14 @@ class RedListTestCase(aiounittest.AsyncTestCase):
         module, api, store = await create_module(
             {"discovery_room": {"active": room_id1, "passives": [room_id2, room_id3]}}
         )
+        room_results = {
+            room_id1: True,
+            room_id2: False,
+            room_id3: True,
+        }
+        api._hs.get_storage_controllers().state.check_local_user_in_room = AsyncMock(
+            side_effect=lambda user_id, room_id: room_results.get(room_id, False)
+        )
 
         await module.update_red_list_status(
             user_id=self.user_id,
@@ -226,12 +237,21 @@ class RedListTestCase(aiounittest.AsyncTestCase):
         self.assertEqual(
             api.run_db_interaction.call_count, 2, api.run_db_interaction.mock_calls
         )
-        api.update_room_membership.assert_called_once_with(
-            sender=self.user_id,
-            target=self.user_id,
-            room_id=room_id1,
-            new_membership=Membership.LEAVE,
-        )
+        expected_calls = [
+            call(
+                sender=self.user_id,
+                target=self.user_id,
+                room_id=room_id1,
+                new_membership=Membership.LEAVE,
+            ),
+            call(
+                sender=self.user_id,
+                target=self.user_id,
+                room_id=room_id3,
+                new_membership=Membership.LEAVE,
+            ),
+        ]
+        api.update_room_membership.assert_has_calls(expected_calls, any_order=True)
 
         in_list, _ = await module._get_user_status(self.user_id)
         self.assertTrue(in_list)
@@ -241,6 +261,9 @@ class RedListTestCase(aiounittest.AsyncTestCase):
         room_id = "!someroom:test"
         module, api = await self._setup_user_in_list(
             {"discovery_room": {"active": room_id}}
+        )
+        api._hs.get_storage_controllers().state.check_local_user_in_room = AsyncMock(
+            side_effect=lambda i_user_id, i_room_id: True
         )
 
         await module.update_red_list_status(
@@ -270,6 +293,15 @@ class RedListTestCase(aiounittest.AsyncTestCase):
         room_id3 = "!someroom3:test"
         module, api = await self._setup_user_in_list(
             {"discovery_room": {"active": room_id1, "passives": [room_id2, room_id3]}}
+        )
+
+        room_results = {
+            room_id1: True,
+            room_id2: False,
+            room_id3: True,
+        }
+        api._hs.get_storage_controllers().state.check_local_user_in_room = AsyncMock(
+            side_effect=lambda user_id, room_id: room_results.get(room_id, False)
         )
 
         await module.update_red_list_status(
