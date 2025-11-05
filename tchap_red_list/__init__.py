@@ -81,7 +81,10 @@ class RedListManager:
         self._api = api
         self.server_name = self._api.server_name
         self._config = config
-        self._state_storage_controller = self._api._hs.get_storage_controllers().state
+        self._state_storage_controller_state = (
+            self._api._hs.get_storage_controllers().state
+        )
+        self._room_member_handler_store = self._api._hs.get_room_member_handler().store
         self._clock = self._api._hs.get_clock()
         (self._template_html, self._template_text,) = self._api.read_templates(
             ["discovery_room_alert.html", "discovery_room_alert.txt"],
@@ -211,7 +214,7 @@ class RedListManager:
                 # Performs leave on all discovery room if user is present
                 elif membership == Membership.LEAVE:
                     for room_id in self._config.discovery_room.all():
-                        is_user_in_room = await self._state_storage_controller.check_local_user_in_room(
+                        is_user_in_room = await self._room_member_handler_store.check_local_user_in_room(
                             user_id, room_id
                         )
                         if is_user_in_room:
@@ -599,10 +602,8 @@ class RedListManager:
         all_discovery_rooms = self._config.discovery_room.all()
         number_of_discovery_rooms = len(all_discovery_rooms)
         for index, discovery_room_id in enumerate(all_discovery_rooms):
-            joined_members_with_profile = (
-                await self._state_storage_controller.get_users_in_room_with_profiles(
-                    discovery_room_id
-                )
+            joined_members_with_profile = await self._state_storage_controller_state.get_users_in_room_with_profiles(
+                discovery_room_id
             )
             joined_members = joined_members_with_profile.keys()
             number_of_joined_members = len(joined_members)

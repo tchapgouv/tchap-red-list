@@ -186,7 +186,7 @@ class RedListTestCase(aiounittest.AsyncTestCase):
         """Tests adding a user to the red list (with a discovery room)"""
         room_id = "!someroom:test"
         module, api, _ = await create_module({"discovery_room": {"active": room_id}})
-        api._hs.get_storage_controllers().state.check_local_user_in_room = AsyncMock(
+        api._hs.get_room_member_handler().store.check_local_user_in_room = AsyncMock(
             side_effect=lambda i_user_id, i_room_id: True
         )
 
@@ -223,7 +223,7 @@ class RedListTestCase(aiounittest.AsyncTestCase):
             room_id2: False,
             room_id3: True,
         }
-        api._hs.get_storage_controllers().state.check_local_user_in_room = AsyncMock(
+        api._hs.get_room_member_handler().store.check_local_user_in_room = AsyncMock(
             side_effect=lambda user_id, room_id: room_results.get(room_id, False)
         )
 
@@ -262,7 +262,7 @@ class RedListTestCase(aiounittest.AsyncTestCase):
         module, api = await self._setup_user_in_list(
             {"discovery_room": {"active": room_id}}
         )
-        api._hs.get_storage_controllers().state.check_local_user_in_room = AsyncMock(
+        api._hs.get_room_member_handler().store.check_local_user_in_room = AsyncMock(
             side_effect=lambda i_user_id, i_room_id: True
         )
 
@@ -291,16 +291,16 @@ class RedListTestCase(aiounittest.AsyncTestCase):
         room_id1 = "!someroom1:test"
         room_id2 = "!someroom2:test"
         room_id3 = "!someroom3:test"
+
         module, api = await self._setup_user_in_list(
             {"discovery_room": {"active": room_id1, "passives": [room_id2, room_id3]}}
         )
-
         room_results = {
             room_id1: True,
             room_id2: False,
             room_id3: True,
         }
-        api._hs.get_storage_controllers().state.check_local_user_in_room = AsyncMock(
+        api._hs.get_room_member_handler().store.check_local_user_in_room = AsyncMock(
             side_effect=lambda user_id, room_id: room_results.get(room_id, False)
         )
 
@@ -456,6 +456,9 @@ class RedListTestCase(aiounittest.AsyncTestCase):
             The return values from create_module.
         """
         module, api, _ = await create_module(config)
+        api._hs.get_room_member_handler().store.check_local_user_in_room = AsyncMock(
+            side_effect=lambda i_user_id, i_room_id: self.user_id == i_user_id
+        )
         await module._add_to_red_list(self.user_id)
         # Reset the mocks, so the action we just performed doesn't interfere with the
         # call counts.
