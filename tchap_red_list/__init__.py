@@ -628,7 +628,7 @@ class RedListManager:
     ) -> None:
         # Synchronize Red List in case we have an issue
         if self._config.discovery_room.sync_red_list:
-            users_in_red_list = self._get_users_in_red_list()
+            users_in_red_list = await self._get_users_in_red_list()
             number_users_in_red_list = len(users_in_red_list)
             logger.info(
                 "Synchronize Red List: Number of user on red list that will Leave from all discovery rooms: %s",
