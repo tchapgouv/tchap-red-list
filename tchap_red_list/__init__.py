@@ -163,9 +163,9 @@ class RedListManager:
         """Update a user's status in the red list when their account data changes.
         Implements the on_account_data_updated account data callback.
         """
-        logger.debug(f"Update Red List {user_id}={content}")
         if account_data_type != ACCOUNT_DATA_TYPE:
             return
+        logger.debug(f"Update Red List {user_id}={content}")
 
         # Compare what status (in the list, not in the list) the user wants to have with
         # what it already has. If they're the same, don't do anything more.
