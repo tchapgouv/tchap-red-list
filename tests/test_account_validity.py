@@ -191,7 +191,10 @@ class AccountValidityRedListTestCase(aiounittest.AsyncTestCase):
         room_id = "!someroom:test"
 
         module, api, store = await create_module(
-            {"discovery_room": room_id, "use_email_account_validity": "true"}
+            {
+                "discovery_room": {"active": room_id},
+                "use_email_account_validity": "true",
+            }
         )
         api._hs.get_storage_controllers().state.get_users_in_room_with_profiles.return_value = make_awaitable(
             {self.already_in_discovery_room_user: ()}
@@ -199,7 +202,7 @@ class AccountValidityRedListTestCase(aiounittest.AsyncTestCase):
         self._setup_synapse_db(store)
         self._setup_account_validity(store)
 
-        await module._update_discovery_room_with_email_account_validity()
+        await module._update_discovery_room_with_red_list_and_email_account_validity()
 
         self.assertEqual(
             api.run_db_interaction.call_count, 1, api.run_db_interaction.mock_calls

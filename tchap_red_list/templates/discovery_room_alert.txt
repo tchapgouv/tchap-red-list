@@ -1,0 +1,6 @@
+Hi Support,
+
+Discovery Room Quota is {{active_room_max_size}}.
+
+Discovery Room: {{ active_room_id }} has {{number_of_joined_members}} members.
+

@@ -12,10 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+import os
 import time
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple, Union
 
 import attr
+from pkg_resources import DistributionNotFound, get_distribution
+from synapse.api.constants import Membership
 from synapse.api.errors import LimitExceededError
 from synapse.module_api import (
     DatabasePool,
@@ -30,16 +33,46 @@ from synapse.module_api.errors import ConfigError, SynapseError
 from synapse.storage.database import LoggingTransaction
 from typing_extensions import Concatenate
 
+UPDATE_MEMBERSHIP_MAX_RETRY = 11
+
 logger = logging.getLogger(__name__)
 
 ACCOUNT_DATA_TYPE = "im.vector.hide_profile"
 
+try:
+    __version__ = get_distribution(__name__).version
+except DistributionNotFound:
+    # package is not installed
+    pass
+
+
+@attr.s(auto_attribs=True, frozen=True)
+class RedListManagerDiscoveryRoomConfig:
+    active: Optional[str] = None
+    passives: List[str] = []
+    support_email: Optional[str] = None
+    active_room_max_size: int = 10000
+    sync_red_list: bool = False
+
+    def all(self) -> List[str]:
+        return [self.active] + self.passives
+
+    def __attrs_post_init__(self):
+        if not self.active:
+            raise ConfigError(
+                "discovery_room is set but discovery_room.active is not configured"
+            )
+
 
 @attr.s(auto_attribs=True, frozen=True)
 class RedListManagerConfig:
-    discovery_room: Optional[str] = None
+    discovery_room: Optional[RedListManagerDiscoveryRoomConfig] = None
     use_email_account_validity: bool = False
     sync_user_batch_size: int = 100
+    job_interval_in_minutes: int = 60
+
+    def is_discovery_room_feature_enabled(self) -> bool:
+        return self.discovery_room is not None
 
 
 class RedListManager:
@@ -50,8 +83,15 @@ class RedListManager:
         self._api = api
         self.server_name = self._api.server_name
         self._config = config
-        self._state_storage_controller = self._api._hs.get_storage_controllers().state
+        self._state_storage_controller_state = (
+            self._api._hs.get_storage_controllers().state
+        )
+        self._room_member_handler_store = self._api._hs.get_room_member_handler().store
         self._clock = self._api._hs.get_clock()
+        (self._template_html, self._template_text,) = self._api.read_templates(
+            ["discovery_room_alert.html", "discovery_room_alert.txt"],
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates"),
+        )
 
         # Register callbacks
         self._api.register_account_data_callbacks(
@@ -74,24 +114,44 @@ class RedListManager:
         # self._api.looping_background_call is taking too much time the next call is not scheduled
         # https://github.com/element-hq/synapse/blob/ec885ffd334df29c99aaf722424d61a9e7739a1a/synapse/util/__init__.py#L130-L130
         if self._config.use_email_account_validity:
-            self._api.looping_background_call(self._add_expired_users, 60 * 60 * 1000)
             self._api.looping_background_call(
-                self._remove_renewed_users, 60 * 60 * 1000
+                self._add_expired_users,
+                self._config.job_interval_in_minutes * 60 * 1000,
             )
-            if self._config.discovery_room:
+            self._api.looping_background_call(
+                self._remove_renewed_users,
+                self._config.job_interval_in_minutes * 60 * 1000,
+            )
+            if self._config.is_discovery_room_feature_enabled():
                 self._api.looping_background_call(
-                    self._update_discovery_room_with_email_account_validity,
-                    60 * 60 * 1000,
+                    self._update_discovery_room_with_red_list_and_email_account_validity,
+                    self._config.job_interval_in_minutes * 60 * 1000,
                 )
         else:
-            if self._config.discovery_room:
+            if self._config.is_discovery_room_feature_enabled():
                 self._api.looping_background_call(
-                    self._update_discovery_room, 60 * 60 * 1000
+                    self._update_discovery_room_with_red_list,
+                    self._config.job_interval_in_minutes * 60 * 1000,
                 )
 
     @staticmethod
     def parse_config(config: Dict[str, Any]) -> RedListManagerConfig:
-        return RedListManagerConfig(**config)
+        discovery_room = config.get("discovery_room")
+
+        if discovery_room:
+            if isinstance(discovery_room, dict):
+                discovery_room = RedListManagerDiscoveryRoomConfig(**discovery_room)
+            else:
+                raise ConfigError(
+                    "discovery_room is set but discovery_room.active is not configured"
+                )
+
+        return RedListManagerConfig(
+            discovery_room=discovery_room,
+            use_email_account_validity=config.get("use_email_account_validity", False),
+            sync_user_batch_size=config.get("sync_user_batch_size", 100),
+            job_interval_in_minutes=config.get("job_interval_in_minutes", 60)
+        )
 
     async def update_red_list_status(
         self,
@@ -103,9 +163,9 @@ class RedListManager:
         """Update a user's status in the red list when their account data changes.
         Implements the on_account_data_updated account data callback.
         """
-        logger.debug(f"Update Red List {user_id}={content}")
         if account_data_type != ACCOUNT_DATA_TYPE:
             return
+        logger.debug(f"Update Red List {user_id}={content}")
 
         # Compare what status (in the list, not in the list) the user wants to have with
         # what it already has. If they're the same, don't do anything more.
@@ -128,7 +188,7 @@ class RedListManager:
             else:
                 await self._remove_from_red_list(user_id)
 
-    async def _maybe_change_membership_in_discovery_room(
+    async def _change_membership_in_discovery_room(
         self, user_id: str, membership: str
     ) -> None:
         """Change a user's membership in the discovery room.
@@ -138,18 +198,43 @@ class RedListManager:
         Args:
             user_id: the user to change the membership of.
             membership: the membership to set for this user.
+                - JOIN only on the active discovery room
+                - LEAVE on all discovery room if user is present
         """
-        if self._config.discovery_room is None:
+        if not self._config.is_discovery_room_feature_enabled():
             return
 
-        for retry_nb in range(1, 11):
+        for retry_nb in range(1, UPDATE_MEMBERSHIP_MAX_RETRY):
             try:
-                await self._api.update_room_membership(
-                    sender=user_id,
-                    target=user_id,
-                    room_id=self._config.discovery_room,
-                    new_membership=membership,
-                )
+                # Performs join only on the active discovery room
+                if membership == Membership.JOIN:
+                    await self._api.update_room_membership(
+                        sender=user_id,
+                        target=user_id,
+                        room_id=self._config.discovery_room.active,
+                        new_membership=membership,
+                    )
+                    logger.debug(
+                        "User [%s] joined Active Discovery Room: %s",
+                        user_id,
+                        self._config.discovery_room.active,
+                    )
+                # Performs leave on all discovery room if user is present
+                elif membership == Membership.LEAVE:
+                    for room_id in self._config.discovery_room.all():
+                        is_user_in_room = await self._room_member_handler_store.check_local_user_in_room(
+                            user_id, room_id
+                        )
+                        if is_user_in_room:
+                            await self._api.update_room_membership(
+                                sender=user_id,
+                                target=user_id,
+                                room_id=room_id,
+                                new_membership=membership,
+                            )
+                            logger.debug(
+                                "User [%s] left Discovery Room: %s", user_id, room_id
+                            )
                 break
             except LimitExceededError:
                 logger.warning(
@@ -217,7 +302,7 @@ class RedListManager:
         # Make the expired users leave the discovery room if there's one.
         for user in users_added:
             await self._api.invalidate_cache(self._get_user_status, (user,))
-            await self._maybe_change_membership_in_discovery_room(user, "leave")
+            await self._change_membership_in_discovery_room(user, Membership.LEAVE)
         logger.info(
             "Add expired users to red list is completed : %s have been added",
             len(users_added),
@@ -276,7 +361,7 @@ class RedListManager:
 
         # Make the renewed users re-join the discovery room if there's one.
         for user in users_removed:
-            await self._maybe_change_membership_in_discovery_room(user, "join")
+            await self._change_membership_in_discovery_room(user, Membership.JOIN)
             logger.debug("Add renewed user %s to discovery room", user)
 
     async def _setup_db(self) -> None:
@@ -335,7 +420,7 @@ class RedListManager:
         await self._api.invalidate_cache(self._get_user_status, (user_id,))
 
         # If there is a room used for user discovery, make them leave it.
-        await self._maybe_change_membership_in_discovery_room(user_id, "leave")
+        await self._change_membership_in_discovery_room(user_id, Membership.LEAVE)
         logger.debug("Add user %s to red list", user_id)
 
     async def _make_addition_permanent(self, user_id: str) -> None:
@@ -381,7 +466,7 @@ class RedListManager:
         await self._api.invalidate_cache(self._get_user_status, (user_id,))
 
         # If there is a room used for user discovery, make them join it.
-        await self._maybe_change_membership_in_discovery_room(user_id, "join")
+        await self._change_membership_in_discovery_room(user_id, Membership.JOIN)
         logger.debug("Remove user %s from red list", user_id)
 
     @cached()
@@ -419,19 +504,19 @@ class RedListManager:
             _get_user_status_txn,
         )
 
-    async def _get_visible_users(
+    async def _select_users(
         self, desc: str, select_users: Callable[Concatenate[LoggingTransaction, P], T]
     ) -> Set[str]:
-        """Selects visible users.
+        """Selects users.
 
         Returns:
             A list of dictionaries, each with a user ID.
         """
 
-        visible_users: List[
-            Dict[str, Union[str, int]]
-        ] = await self._api.run_db_interaction(desc, select_users)
-        return set(map(lambda user: user[0], visible_users))
+        users: List[Dict[str, Union[str, int]]] = await self._api.run_db_interaction(
+            desc, select_users
+        )
+        return set(map(lambda user: user[0], users))
 
     async def _get_visible_users_not_in_red_list(self) -> Set[str]:
         """Selects active users who are not in the red list.
@@ -454,8 +539,32 @@ class RedListManager:
             )
             return txn.fetchall()
 
-        return await self._get_visible_users(
+        return await self._select_users(
             "get_visible_users_not_in_red_list", select_users_not_in_red_list_txn
+        )
+
+    async def _get_users_in_red_list(self) -> Set[str]:
+        """Selects active users who are in the red list.
+
+        Returns:
+            A list of dictionaries, each with a user ID.
+        """
+
+        def select_users_in_red_list_txn(txn):
+            txn.execute(
+                """
+                SELECT trl.user_id
+                FROM tchap_red_list trl
+                LEFT JOIN users u ON u.name = trl.user_id
+                WHERE u.deactivated = 0
+                ORDER BY u.creation_ts DESC
+                """,
+                (),
+            )
+            return txn.fetchall()
+
+        return await self._select_users(
+            "_get_users_in_red_list", select_users_in_red_list_txn
         )
 
     async def _get_visible_users_not_expired_not_in_red_list(self) -> Set[str]:
@@ -482,75 +591,128 @@ class RedListManager:
             )
             return txn.fetchall()
 
-        return await self._get_visible_users(
+        return await self._select_users(
             "get_visible_users_not_expired_not_in_red_list",
             select_users_not_expired_not_in_red_list_txn,
         )
 
-    async def _update_discovery_room(self) -> None:
-        if not self._config.discovery_room:
+    async def _update_discovery_room_with_red_list(self) -> None:
+        if not self._config.is_discovery_room_feature_enabled():
             return
         logger.info(
-            "Add missing users to discovery room: %s", self._config.discovery_room
+            "Add missing users to discovery room: %s",
+            self._config.discovery_room.active,
         )
+        # Get all visible users (not on red list)
+        await self._update_discovery_room(self._get_visible_users_not_in_red_list)
 
-        visible_users = await self._get_visible_users_not_in_red_list()
-        logger.debug("Number of users on homeserver: %s", len(visible_users))
-        joined_members_with_profile = (
-            await self._state_storage_controller.get_users_in_room_with_profiles(
-                self._config.discovery_room
-            )
-        )
-        joined_members = joined_members_with_profile.keys()
-        logger.debug("Number of users in discovery room: %s", len(joined_members))
-        users_missing_in_room = set(visible_users).difference(set(joined_members))
-        logger.info(
-            "Number of missing users in discovery room: %s", len(users_missing_in_room)
-        )
-        users_missing_in_room_batch = list(users_missing_in_room)[
-            : self._config.sync_user_batch_size
-        ]
-        for index, user_id in enumerate(users_missing_in_room_batch):
-            await self._maybe_change_membership_in_discovery_room(user_id, "join")
-            logger.info(
-                "%s/%s Adding user %s in discovery room",
-                index + 1,
-                len(users_missing_in_room_batch),
-                user_id,
-            )
-        logger.info(
-            "Add missing users to discovery room: %s is completed",
-            self._config.discovery_room,
-        )
-
-    async def _update_discovery_room_with_email_account_validity(self) -> None:
+    async def _update_discovery_room_with_red_list_and_email_account_validity(
+        self,
+    ) -> None:
         if (
-            not self._config.discovery_room
+            not self._config.is_discovery_room_feature_enabled()
             or not self._config.use_email_account_validity
         ):
             return
         logger.info(
-            "Add missing users to discovery room: %s", self._config.discovery_room
+            "Add missing users to discovery room: %s",
+            self._config.discovery_room.active,
+        )
+        # Get all visible users (not on red list and not expired users)
+        await self._update_discovery_room(
+            self._get_visible_users_not_expired_not_in_red_list
         )
 
-        visible_users = await self._get_visible_users_not_expired_not_in_red_list()
-        logger.debug("Number of users on homeserver: %s", len(visible_users))
-        joined_members_with_profile = (
-            await self._state_storage_controller.get_users_in_room_with_profiles(
-                self._config.discovery_room
+    async def _update_discovery_room(
+        self, get_visible_users_fn: Callable[[], Awaitable[Set[str]]]
+    ) -> None:
+        # Synchronize Red List in case we have an issue
+        if self._config.discovery_room.sync_red_list:
+            users_in_red_list = await self._get_users_in_red_list()
+            number_users_in_red_list = len(users_in_red_list)
+            logger.info(
+                "Synchronize Red List: Number of user on red list that will Leave from all discovery rooms: %s",
+                number_users_in_red_list,
             )
-        )
-        joined_members = joined_members_with_profile.keys()
-        logger.debug("Number of users in discovery room: %s", len(joined_members))
-        users_missing_in_room = set(visible_users).difference(set(joined_members))
+            for index, user_id in enumerate(users_in_red_list):
+                await self._change_membership_in_discovery_room(
+                    user_id, Membership.LEAVE
+                )
+                logger.debug(
+                    "Synchronize Red List - [%s/%s users] - %s left all discovery rooms",
+                    index + 1,
+                    number_users_in_red_list,
+                    user_id,
+                )
+        # Get visible users
+        visible_users = await get_visible_users_fn()
+        logger.debug("Number of users on homeserver: %s", len(visible_users))
+        # Get all users from all discovery rooms
+        users_missing_in_room = set(visible_users)
+        all_discovery_rooms = self._config.discovery_room.all()
+        number_of_discovery_rooms = len(all_discovery_rooms)
+        for index, discovery_room_id in enumerate(all_discovery_rooms):
+            joined_members_with_profile = await self._state_storage_controller_state.get_users_in_room_with_profiles(
+                discovery_room_id
+            )
+            joined_members = joined_members_with_profile.keys()
+            number_of_joined_members = len(joined_members)
+            logger.debug(
+                "Number of users in discovery room %s/%s [%s]: %s",
+                index + 1,
+                number_of_discovery_rooms,
+                discovery_room_id,
+                number_of_joined_members,
+            )
+            # Send email if active is room has reached limit in order to create other room
+            if (
+                self._config.discovery_room.support_email
+                and discovery_room_id == self._config.discovery_room.active
+                and number_of_joined_members
+                >= self._config.discovery_room.active_room_max_size
+            ):
+                template_vars = {
+                    "active_room_max_size": self._config.discovery_room.active_room_max_size,
+                    "active_room_id": self._config.discovery_room.active,
+                    "number_of_joined_members": number_of_joined_members,
+                }
+
+                html_text = self._template_html.render(**template_vars)
+                plain_text = self._template_text.render(**template_vars)
+                await self._api.send_mail(
+                    recipient=self._config.discovery_room.support_email,
+                    subject=f"{self.server_name} - Discovery Room has reached limit",
+                    html=html_text,
+                    text=plain_text,
+                )
+                logger.debug(
+                    "Send an alert email to %s [quota=%s, active_discovery_room=%s, number_of_joined_members=%s]",
+                    self._config.discovery_room.support_email,
+                    self._config.discovery_room.active_room_max_size,
+                    self._config.discovery_room.active,
+                    number_of_joined_members,
+                )
+
+            users_missing_in_room = users_missing_in_room.difference(
+                set(joined_members)
+            )
+            logger.debug(
+                "Current number of missing users after checking discovery rooms %s/%s [%s]: %s",
+                index + 1,
+                number_of_discovery_rooms,
+                discovery_room_id,
+                len(users_missing_in_room),
+            )
+
         logger.info(
-            "Number of missing users in discovery room: %s", len(users_missing_in_room)
+            "Number of missing users in all discovery rooms: %s",
+            len(users_missing_in_room),
         )
         users_missing_in_room_batch = list(users_missing_in_room)[
             : self._config.sync_user_batch_size
         ]
         for index, user_id in enumerate(users_missing_in_room_batch):
-            await self._maybe_change_membership_in_discovery_room(user_id, "join")
+            await self._change_membership_in_discovery_room(user_id, Membership.JOIN)
             logger.info(
                 "%s/%s Adding user %s in discovery room",
                 index + 1,
@@ -559,5 +721,5 @@ class RedListManager:
             )
         logger.info(
             "Add missing users to discovery room: %s is completed",
-            self._config.discovery_room,
+            self._config.discovery_room.active,
         )
