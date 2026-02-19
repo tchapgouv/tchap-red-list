@@ -51,7 +51,7 @@ class RedListManager:
         self.server_name = self._api.server_name
         self._config = config
         self._state_storage_controller = self._api._hs.get_storage_controllers().state
-        self._clock = self._api._hs.get_clock()
+        self.clock = self._api._hs.get_clock()
 
         # Register callbacks
         self._api.register_account_data_callbacks(
@@ -158,7 +158,7 @@ class RedListManager:
                     membership,
                     retry_nb,
                 )
-                await self._clock.sleep(0.5 * retry_nb)
+                await self.clock.sleep(0.5 * retry_nb)
             except RuntimeError as e:
                 logger.warning(
                     "Cannot update discovery room : %s - %s : %s",
